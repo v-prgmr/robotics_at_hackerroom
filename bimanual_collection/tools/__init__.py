@@ -1,0 +1,1 @@
+"""Interactive hardware discovery utilities."""

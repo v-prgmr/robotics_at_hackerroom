@@ -1,0 +1,48 @@
+[project]
+name = "orbit"
+version = "0.1.0"
+description = "Bimanual SO-100 teleoperation and data collection pipeline for LeRobot 0.4.4"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "lerobot[feetech]==0.4.4",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9,<4.13",
+    "av>=15,<16",
+    "pandas>=2.1",
+    "pyarrow>=15",
+    "pyserial>=3.5,<4",
+    "pynput>=1.7.7,<1.9",
+    "evdev>=1.9,<2",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.1,<9",
+]
+
+[project.scripts]
+bimanual-teleop = "bimanual_collection.bimanual_teleop:main"
+bimanual-validate = "bimanual_collection.validation.validate_dataset:main"
+bimanual-find-ports = "bimanual_collection.tools.find_ports:main"
+bimanual-find-cameras = "bimanual_collection.tools.find_cameras:main"
+bimanual-calibrate = "bimanual_collection.tools.calibrate_arms:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["bimanual_collection"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

@@ -1,0 +1,43 @@
+left_robot_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3E091081-if00
+right_robot_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA082179-if00
+left_leader_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA082742-if00
+right_leader_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5AE6084769-if00
+
+overhead_camera: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:3.1.4:1.0-video-index0
+left_wrist_camera: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:3.2:1.0-video-index0
+right_wrist_camera: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:3.1.3:1.0-video-index0
+camera_width: 1280
+camera_height: 720
+camera_fps: 30
+
+calibration_dir: ./calibration/so100_bimanual
+calibration_ids:
+  left_follower: left_follower
+  right_follower: right_follower
+  left_leader: left_leader
+  right_leader: right_leader
+
+teleop_control:
+  startup_alignment: leader_absolute
+  move_followers_to_home: true
+  home_position_file: ./calibration/so100_bimanual/home_positions.yaml
+  home_move_duration_s: 2.0
+  home_move_steps: 120
+
+recording_control:
+  manual_start: true
+  start_save_key: r
+  cancel_key: null
+  status_interval_s: 5.0
+
+footswitch:
+  enabled: true
+  backend: evdev
+  debounce_s: 0.05
+  third_pedal_mode: recording
+  recording_hold_cancel_s: 2.0
+  evdev:
+    device: /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd
+    left_clutch_code: KEY_A
+    right_clutch_code: KEY_B
+    pause_code: KEY_C

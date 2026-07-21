@@ -1,0 +1,4 @@
+left_robot_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3E091081-if00
+right_robot_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA082179-if00
+left_leader_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA082742-if00
+right_leader_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5AE6084769-if00

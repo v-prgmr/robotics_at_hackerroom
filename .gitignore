@@ -1,0 +1,16 @@
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+
+.idea/
+.vscode/
+
+outputs/
+data/
+*_v1/
+trial_dataset_*/
+
+.DS_Store
