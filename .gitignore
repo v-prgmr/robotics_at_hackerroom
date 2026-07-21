@@ -9,7 +9,7 @@ __pycache__/
 .vscode/
 
 outputs/
-data/
+dataset/
 *_v1/
 *_lerobot/
 trial_dataset_*/
