@@ -295,7 +295,32 @@ The validator checks timestamp monotonicity, missing robot states, missing camer
 
 ## LeRobot Export
 
-The intermediate format can be deterministically converted to LeRobot v3.0 using `bimanual_collection.recording.backends.lerobot_export.export_to_lerobot`. The converter duplicates indexed camera frames as needed to produce one LeRobot observation per robot timestep.
+The intermediate format can be deterministically converted to LeRobot v3.0 using `bimanual-export-lerobot`. The converter duplicates indexed camera frames as needed to produce one LeRobot observation per robot timestep.
+
+```bash
+uv run bimanual-export-lerobot \
+    --input-dir ./teabags_kitting_50_v1 \
+    --output-dir ./teabags_kitting_50_v1_lerobot \
+    --repo-id vrazer/teabags_kitting_50_v1 \
+    --fps 60 \
+    --video-codec h264 \
+    --encoder-threads 1
+```
+
+`--output-dir` must not already exist unless `--overwrite` is passed.
+
+The exporter streams camera frames from MP4s instead of caching full videos in memory. `--video-codec h264 --encoder-threads 1` is the lower-memory default. `libsvtav1` is supported by LeRobot but can use much more RAM on large multi-camera exports.
+
+View the exported dataset with LeRobot's Rerun viewer:
+
+```bash
+uv run lerobot-dataset-viz \
+    --repo-id vrazer/teabags_kitting_50_v1 \
+    --root ./teabags_kitting_50_v1_lerobot \
+    --episode-index 0
+```
+
+Episode indices in `lerobot-dataset-viz` are zero-based, so Orbit `Episode 1` is `--episode-index 0`.
 
 ## Test Plan
 

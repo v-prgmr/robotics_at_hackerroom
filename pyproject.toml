@@ -28,6 +28,7 @@ bimanual-validate = "bimanual_collection.validation.validate_dataset:main"
 bimanual-find-ports = "bimanual_collection.tools.find_ports:main"
 bimanual-find-cameras = "bimanual_collection.tools.find_cameras:main"
 bimanual-calibrate = "bimanual_collection.tools.calibrate_arms:main"
+bimanual-export-lerobot = "bimanual_collection.tools.export_lerobot:main"
 
 [build-system]
 requires = ["hatchling"]
