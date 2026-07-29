@@ -28,3 +28,7 @@ trial_dataset_*/
 /ManiFlow_Policy/
 
 .DS_Store
+
+# Local RunPod command buffers with real tokens. Keep tracked files as templates only.
+runpod_private_exports.sh
+runpod_*_private*.txt

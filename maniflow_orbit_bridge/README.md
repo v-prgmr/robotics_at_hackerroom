@@ -266,6 +266,45 @@ bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
 
 The launcher knows training ended because `train_maniflow_orbit_workspace.py` runs as a foreground process. The shell waits for it, captures its exit code, then runs upload/stop logic.
 
+## RunPod Smoke Test
+
+After `runpod_setup_maniflow_env.sh` finishes successfully, run this from the pod to confirm dataset download, bridge install, CUDA/PyTorch imports, and a short ManiFlow debug training loop all work.
+
+For a step-by-step demo that downloads the dataset, trains once, writes `latest.ckpt`, uploads it to HF Hub, then stops the pod, copy from:
+
+```text
+/workspace/orbit/runpod_smoke_test_commands.txt
+```
+
+Replace the HF values first. If your dataset repo is public, `HF_TOKEN` can be omitted.
+
+```bash
+cd /workspace/orbit
+git pull
+
+export HF_TOKEN="<your-hf-token>"
+export HF_DATASET_REPO_ID="<your-hf-dataset-repo>"
+export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
+export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
+export RUN_NAME="maniflow_teabags_v2_runpod_smoke"
+export DEBUG="True"
+export BATCH_SIZE="2"
+export NUM_WORKERS="2"
+export LOGGING_MODE="offline"
+export PUSH_TO_HF="false"
+export STOP_POD_ON_EXIT="false"
+
+bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
+```
+
+The smoke test passes if the command exits with code `0`, prints `Training exited with code 0`, and creates:
+
+```text
+/workspace/outputs/train/maniflow_teabags_v2_runpod_smoke/checkpoints/latest.ckpt
+```
+
+The losses only need to be finite for this test. They do not need to improve during a debug smoke run.
+
 Run from the ManiFlow workspace directory:
 
 ```bash
@@ -273,7 +312,7 @@ conda activate maniflow
 cd /home/vrazer/workspace/orbit/maniflow/maniflow/workspace
 ```
 
-Smoke test command:
+Manual smoke test command:
 
 ```bash
 python train_maniflow_orbit_workspace.py \
