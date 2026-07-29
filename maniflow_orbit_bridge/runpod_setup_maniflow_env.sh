@@ -75,6 +75,7 @@ python -m pip install \
     "scikit-learn==1.3.2" \
     "pandas" \
     "pyarrow==15.0.2" \
+    "h5py==3.13.0" \
     "opencv-python==4.5.5.64" \
     "zarr==2.12.0" \
     "numcodecs<0.16" \
@@ -108,6 +109,7 @@ python "${ORBIT_DIR}/maniflow_orbit_bridge/install_into_maniflow.py" \
 
 python - <<'PY'
 import cv2
+import h5py
 import hydra
 import numpy
 import pandas
@@ -125,6 +127,7 @@ print("torch", torch.__version__)
 print("torch cuda available", torch.cuda.is_available())
 print("numpy", numpy.__version__)
 print("cv2", cv2.__version__)
+print("h5py", h5py.__version__)
 print("pyarrow", pyarrow.__version__)
 print("zarr", zarr.__version__)
 print("transformers", transformers.__version__)
