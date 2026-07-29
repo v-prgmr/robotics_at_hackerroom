@@ -192,11 +192,11 @@ export HF_DATASET_REPO_ID="<your-hf-dataset-repo>"
 export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
 export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
 export RUN_NAME="maniflow_teabags_v2"
-export BATCH_SIZE="16"
-export LOGGING_MODE="offline"
 
 bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
 ```
+
+The YAML config is the source of truth for training settings. The launcher only overrides YAML values when you explicitly export an override such as `BATCH_SIZE`, `NUM_EPOCHS`, `DEBUG`, `GPU_DEVICE`, `NUM_WORKERS`, or `LOGGING_MODE`, or when you pass Hydra overrides after the script command.
 
 The launcher writes artifacts to:
 
@@ -222,12 +222,12 @@ Useful RunPod launcher overrides:
 - `CONDA_ENV`: default `maniflow`.
 - `CONDA_ENV_DIR`: default `/workspace/conda_envs/$CONDA_ENV`; training activates this persistent env if present.
 - `MINICONDA_DIR`: default `/workspace/miniconda3`; used if `conda` is not already on `PATH`.
-- `GPU_DEVICE`: default `cuda:0`.
-- `BATCH_SIZE`: default `16`.
-- `NUM_WORKERS`: default `4`.
-- `NUM_EPOCHS`: default `501`.
-- `DEBUG`: default `False`; set `True` for a smoke run.
-- `LOGGING_MODE`: default `offline`.
+- `GPU_DEVICE`: optional; overrides YAML `training.device` only when set.
+- `BATCH_SIZE`: optional; overrides YAML train and validation batch sizes only when set.
+- `NUM_WORKERS`: optional; overrides YAML train and validation worker counts only when set.
+- `NUM_EPOCHS`: optional; overrides YAML `training.num_epochs` only when set.
+- `DEBUG`: optional; overrides YAML `training.debug` only when set. Set `True` for a smoke run.
+- `LOGGING_MODE`: optional; overrides YAML `logging.mode` only when set.
 - `PUSH_TO_HF`: default `false`; set `true` to upload artifacts after training exits.
 - `PUSH_TO_HF_ON_SUCCESS_ONLY`: default `true`; skip HF upload if training failed.
 - `HF_REPO_ID`: required when `PUSH_TO_HF=true`, for example `v-prgmr/maniflow-teabags-v2`.
@@ -252,10 +252,6 @@ export HF_DATASET_REPO_ID="<your-hf-dataset-repo>"
 export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
 export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
 export RUN_NAME="maniflow_teabags_v2"
-export BATCH_SIZE="16"
-export NUM_WORKERS="4"
-export NUM_EPOCHS="501"
-export LOGGING_MODE="online"
 
 export PUSH_TO_HF="true"
 export HF_REPO_ID="<your-hf-model-repo>"

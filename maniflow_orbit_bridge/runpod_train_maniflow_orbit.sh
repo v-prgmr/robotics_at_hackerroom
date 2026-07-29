@@ -9,13 +9,13 @@ set -euo pipefail
 #   /workspace/dataset/<dataset>.zarr      converted Orbit ManiFlow zarr dataset
 #   /workspace/outputs/train/<run_name>/   training outputs/checkpoints
 #
-# Override defaults with environment variables, for example:
+# Runtime paths and HF repos can be set with environment variables, for example:
 #   DATASET_NAME=teabags_kitting_50_v2_maniflow.zarr \
 #   HF_DATASET_REPO_ID=v-prgmr/teabags-kitting-50-v2-maniflow \
 #   RUN_NAME=maniflow_teabags_v2 \
-#   BATCH_SIZE=8 \
-#   LOGGING_MODE=offline \
 #   bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
+#
+# Training knobs come from YAML unless explicitly set via env vars or Hydra args.
 
 is_true() {
     case "${1:-}" in
@@ -44,12 +44,12 @@ OUTPUT_DIR="${OUTPUT_DIR:-${WORKSPACE_DIR}/outputs/train/${RUN_NAME}}"
 CONDA_ENV="${CONDA_ENV:-maniflow}"
 CONDA_ENV_DIR="${CONDA_ENV_DIR:-${WORKSPACE_DIR}/conda_envs/${CONDA_ENV}}"
 MINICONDA_DIR="${MINICONDA_DIR:-${WORKSPACE_DIR}/miniconda3}"
-GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
-NUM_WORKERS="${NUM_WORKERS:-4}"
-NUM_EPOCHS="${NUM_EPOCHS:-501}"
-DEBUG="${DEBUG:-False}"
-LOGGING_MODE="${LOGGING_MODE:-offline}"
+GPU_DEVICE="${GPU_DEVICE:-}"
+BATCH_SIZE="${BATCH_SIZE:-}"
+NUM_WORKERS="${NUM_WORKERS:-}"
+NUM_EPOCHS="${NUM_EPOCHS:-}"
+DEBUG="${DEBUG:-}"
+LOGGING_MODE="${LOGGING_MODE:-}"
 
 PUSH_TO_HF="${PUSH_TO_HF:-false}"
 PUSH_TO_HF_ON_SUCCESS_ONLY="${PUSH_TO_HF_ON_SUCCESS_ONLY:-true}"
@@ -177,24 +177,39 @@ cd "${MANIFLOW_DIR}/maniflow/workspace"
 echo "Starting Orbit ManiFlow training"
 echo "  dataset: ${DATASET_ZARR}"
 echo "  output:  ${OUTPUT_DIR}"
-echo "  device:  ${GPU_DEVICE}"
-echo "  debug:   ${DEBUG}"
+
+HYDRA_OVERRIDES=(
+    "robotwin_task=orbit_so100_image"
+    "robotwin_task.dataset.zarr_path=${DATASET_ZARR}"
+    "hydra.run.dir=${OUTPUT_DIR}"
+    "exp_name=${RUN_NAME}"
+)
+
+if [[ -n "${DEBUG}" ]]; then
+    HYDRA_OVERRIDES+=("training.debug=${DEBUG}")
+fi
+if [[ -n "${GPU_DEVICE}" ]]; then
+    HYDRA_OVERRIDES+=("training.device=${GPU_DEVICE}")
+fi
+if [[ -n "${NUM_EPOCHS}" ]]; then
+    HYDRA_OVERRIDES+=("training.num_epochs=${NUM_EPOCHS}")
+fi
+if [[ -n "${BATCH_SIZE}" ]]; then
+    HYDRA_OVERRIDES+=("dataloader.batch_size=${BATCH_SIZE}")
+    HYDRA_OVERRIDES+=("val_dataloader.batch_size=${BATCH_SIZE}")
+fi
+if [[ -n "${NUM_WORKERS}" ]]; then
+    HYDRA_OVERRIDES+=("dataloader.num_workers=${NUM_WORKERS}")
+    HYDRA_OVERRIDES+=("val_dataloader.num_workers=${NUM_WORKERS}")
+fi
+if [[ -n "${LOGGING_MODE}" ]]; then
+    HYDRA_OVERRIDES+=("logging.mode=${LOGGING_MODE}")
+fi
 
 set +e
 python train_maniflow_orbit_workspace.py \
     --config-name=maniflow_image_orbit.yaml \
-    robotwin_task=orbit_so100_image \
-    robotwin_task.dataset.zarr_path="${DATASET_ZARR}" \
-    hydra.run.dir="${OUTPUT_DIR}" \
-    exp_name="${RUN_NAME}" \
-    training.debug="${DEBUG}" \
-    training.device="${GPU_DEVICE}" \
-    training.num_epochs="${NUM_EPOCHS}" \
-    dataloader.batch_size="${BATCH_SIZE}" \
-    val_dataloader.batch_size="${BATCH_SIZE}" \
-    dataloader.num_workers="${NUM_WORKERS}" \
-    val_dataloader.num_workers="${NUM_WORKERS}" \
-    logging.mode="${LOGGING_MODE}" \
+    "${HYDRA_OVERRIDES[@]}" \
     "$@"
 TRAIN_EXIT_CODE=$?
 set -e
