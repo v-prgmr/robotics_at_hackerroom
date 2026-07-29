@@ -31,4 +31,5 @@ trial_dataset_*/
 
 # Local RunPod command buffers with real tokens. Keep tracked files as templates only.
 runpod_private_exports.sh
+runpod_smoke_test_commands.txt
 runpod_*_private*.txt

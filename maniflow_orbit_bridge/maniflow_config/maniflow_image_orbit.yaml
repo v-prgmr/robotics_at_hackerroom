@@ -6,7 +6,7 @@ name: train_maniflow_image_orbit
 
 task_name: ${robotwin_task.name}
 shape_meta: ${robotwin_task.shape_meta}
-exp_name: orbit_so100_maniflow_teabags_25_episodes
+exp_name: so100_maniflow_teabags_50_v2_150ep
 
 horizon: 16
 n_obs_steps: 2
@@ -112,11 +112,11 @@ training:
   resume: true
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 150
+  num_epochs: 151
   gradient_accumulate_every: 8
   use_ema: true
   rollout_every: 100
-  checkpoint_every: 50
+  checkpoint_every: 25
   val_every: 10
   sample_every: 5
   max_train_steps: null
@@ -132,7 +132,10 @@ logging:
   resume: true
   tags:
     - ${logging.project}
-    - orbit_so100_maniflow_teabags_25_episodes
+    - orbit_so100
+    - teabags_kitting_50_v2
+    - maniflow_image
+    - 150_epochs
 
 checkpoint:
   save_ckpt: true
