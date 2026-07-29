@@ -22,6 +22,11 @@ def install(maniflow_dir: Path, *, overwrite: bool = False) -> None:
     if not package_dir.exists():
         raise FileNotFoundError(f"Expected ManiFlow package directory at {package_dir}")
 
+    init_file = package_dir / "__init__.py"
+    if not init_file.exists():
+        init_file.touch()
+        print(f"Installed {init_file}")
+
     files = [
         (
             source_dir / "maniflow_dataset/orbit_image_dataset.py",

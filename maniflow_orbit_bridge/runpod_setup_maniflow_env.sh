@@ -97,6 +97,9 @@ python -m pip install \
     "sentencepiece==0.2.0" \
     "ftfy"
 
+# Upstream ManiFlow may not include this package marker, which makes
+# `pip install -e` succeed while `import maniflow` still fails.
+touch "${MANIFLOW_DIR}/maniflow/__init__.py"
 python -m pip install -e "${MANIFLOW_DIR}"
 
 python "${ORBIT_DIR}/maniflow_orbit_bridge/install_into_maniflow.py" \

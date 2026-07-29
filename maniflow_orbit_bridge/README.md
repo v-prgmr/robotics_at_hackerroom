@@ -455,6 +455,14 @@ cd /workspace/orbit
 bash maniflow_orbit_bridge/runpod_setup_maniflow_env.sh
 ```
 
+If setup fails with `ModuleNotFoundError: No module named 'maniflow'`, pull the latest Orbit repo and rerun setup. The setup script creates ManiFlow's missing `maniflow/__init__.py` before editable install:
+
+```bash
+cd /workspace/orbit
+git pull
+bash maniflow_orbit_bridge/runpod_setup_maniflow_env.sh
+```
+
 If Hydra cannot find the config, reinstall the bridge:
 
 ```bash
