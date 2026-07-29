@@ -18,6 +18,25 @@ This bridge is intentionally separate from the Orbit package. Orbit records/expo
 
 Use ManiFlow's own conda environment. Do not install ManiFlow into Orbit's `uv` environment because the dependency pins differ.
 
+On RunPod with `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`, run the setup script from this repo after cloning it to `/workspace/orbit`:
+
+```bash
+cd /workspace/orbit
+bash maniflow_orbit_bridge/runpod_setup_maniflow_env.sh
+```
+
+This creates a Python 3.10 conda env named `maniflow`, clones ManiFlow to `/workspace/maniflow` if needed, installs the minimal Orbit 2D training dependencies, installs ManiFlow editable, and copies the Orbit bridge into ManiFlow.
+
+RunPod setup overrides:
+
+- `WORKSPACE_DIR`: default `/workspace`.
+- `ORBIT_DIR`: default `/workspace/orbit`.
+- `MANIFLOW_DIR`: default `/workspace/maniflow`.
+- `CONDA_ENV`: default `maniflow`.
+- `PYTHON_VERSION`: default `3.10`.
+
+Manual setup is also possible:
+
 ```bash
 git clone https://github.com/allenai/maniflow.git /home/vrazer/workspace/orbit/maniflow
 cd /home/vrazer/workspace/orbit/maniflow/scripts
@@ -159,6 +178,72 @@ train_maniflow_orbit_workspace.py
 ```
 
 Do not use ManiFlow's stock `train_maniflow_robotwin_workspace.py` for Orbit, because it imports pointcloud code and may require PyTorch3D even for image-only configs.
+
+On RunPod, use the launcher if your repo is at `/workspace/orbit`, ManiFlow is at `/workspace/maniflow`, and the converted zarr is under `/workspace/dataset`:
+
+```bash
+cd /workspace/orbit
+
+DATASET_NAME=teabags_kitting_50_v2_maniflow.zarr \
+RUN_NAME=maniflow_teabags_v2 \
+BATCH_SIZE=16 \
+LOGGING_MODE=offline \
+bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
+```
+
+The launcher writes artifacts to:
+
+```text
+/workspace/outputs/train/<RUN_NAME>/
+```
+
+Useful RunPod launcher overrides:
+
+- `WORKSPACE_DIR`: default `/workspace`.
+- `ORBIT_DIR`: default `/workspace/orbit`.
+- `MANIFLOW_DIR`: default `/workspace/maniflow`.
+- `DATASET_NAME`: default `teabags_kitting_50_v2_maniflow.zarr` under `/workspace/dataset`.
+- `DATASET_ZARR`: full explicit zarr path, overrides `DATASET_NAME`.
+- `RUN_NAME`: default `maniflow_teabags_v2`.
+- `OUTPUT_DIR`: full explicit output path, defaults to `/workspace/outputs/train/$RUN_NAME`.
+- `CONDA_ENV`: default `maniflow`.
+- `GPU_DEVICE`: default `cuda:0`.
+- `BATCH_SIZE`: default `16`.
+- `NUM_WORKERS`: default `4`.
+- `NUM_EPOCHS`: default `501`.
+- `DEBUG`: default `False`; set `True` for a smoke run.
+- `LOGGING_MODE`: default `offline`.
+- `PUSH_TO_HF`: default `false`; set `true` to upload artifacts after training exits.
+- `PUSH_TO_HF_ON_SUCCESS_ONLY`: default `true`; skip HF upload if training failed.
+- `HF_REPO_ID`: required when `PUSH_TO_HF=true`, for example `v-prgmr/maniflow-teabags-v2`.
+- `HF_REPO_TYPE`: default `model`.
+- `HF_TOKEN`: HF token. If omitted, the current HF CLI login/cache is used.
+- `HF_PRIVATE`: default `false`; used when creating the repo if it does not exist.
+- `HF_REMOTE_PREFIX`: default `runs/$RUN_NAME` inside the HF repo.
+- `HF_UPLOAD_ALL_CHECKPOINTS`: default `false`; uploads only `checkpoints/latest.ckpt` unless true.
+- `HF_UPLOAD_WANDB`: default `false`; upload the local W&B folder if true.
+- `STOP_POD_ON_EXIT`: default `false`; set `true` to stop the RunPod pod after post-training upload.
+- `STOP_POD_ON_SUCCESS_ONLY`: default `true`; only stop if training and artifact upload succeeded.
+- `RUNPOD_API_KEY`: required when `STOP_POD_ON_EXIT=true`.
+- `RUNPOD_POD_ID`: required when `STOP_POD_ON_EXIT=true`; RunPod may expose this automatically, otherwise set it manually.
+
+RunPod with HF upload and stop-on-success:
+
+```bash
+cd /workspace/orbit
+
+PUSH_TO_HF=true \
+HF_REPO_ID=v-prgmr/maniflow-teabags-v2 \
+HF_TOKEN=<your-hf-token> \
+STOP_POD_ON_EXIT=true \
+RUNPOD_API_KEY=<your-runpod-api-key> \
+RUNPOD_POD_ID=<your-pod-id> \
+DATASET_NAME=teabags_kitting_50_v2_maniflow.zarr \
+RUN_NAME=maniflow_teabags_v2 \
+bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
+```
+
+The launcher knows training ended because `train_maniflow_orbit_workspace.py` runs as a foreground process. The shell waits for it, captures its exit code, then runs upload/stop logic.
 
 Run from the ManiFlow workspace directory:
 
