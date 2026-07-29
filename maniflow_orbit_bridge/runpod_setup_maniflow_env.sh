@@ -22,11 +22,34 @@ ORBIT_DIR="${ORBIT_DIR:-${WORKSPACE_DIR}/orbit}"
 MANIFLOW_DIR="${MANIFLOW_DIR:-${WORKSPACE_DIR}/maniflow}"
 CONDA_ENV="${CONDA_ENV:-maniflow}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
+MINICONDA_DIR="${MINICONDA_DIR:-${WORKSPACE_DIR}/miniconda3}"
+MINICONDA_URL="${MINICONDA_URL:-https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh}"
 
 mkdir -p "${WORKSPACE_DIR}"
 
 if ! command -v conda >/dev/null 2>&1; then
-    echo "conda not found. Use a RunPod image with conda, such as runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04."
+    if [[ -x "${MINICONDA_DIR}/bin/conda" ]]; then
+        echo "conda not found on PATH; using existing Miniconda at ${MINICONDA_DIR}"
+        export PATH="${MINICONDA_DIR}/bin:${PATH}"
+    else
+        echo "conda not found; installing Miniconda into ${MINICONDA_DIR}"
+        MINICONDA_INSTALLER="${WORKSPACE_DIR}/miniconda.sh"
+        if command -v curl >/dev/null 2>&1; then
+            curl -L "${MINICONDA_URL}" -o "${MINICONDA_INSTALLER}"
+        elif command -v wget >/dev/null 2>&1; then
+            wget "${MINICONDA_URL}" -O "${MINICONDA_INSTALLER}"
+        else
+            echo "Neither curl nor wget is available to download Miniconda."
+            exit 1
+        fi
+        bash "${MINICONDA_INSTALLER}" -b -p "${MINICONDA_DIR}"
+        rm -f "${MINICONDA_INSTALLER}"
+        export PATH="${MINICONDA_DIR}/bin:${PATH}"
+    fi
+fi
+
+if ! command -v conda >/dev/null 2>&1; then
+    echo "conda install failed or conda is still not on PATH."
     exit 1
 fi
 

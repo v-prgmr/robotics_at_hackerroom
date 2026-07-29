@@ -25,7 +25,7 @@ cd /workspace/orbit
 bash maniflow_orbit_bridge/runpod_setup_maniflow_env.sh
 ```
 
-This creates a Python 3.10 conda env named `maniflow`, clones ManiFlow to `/workspace/maniflow` if needed, installs the minimal Orbit 2D training dependencies, installs ManiFlow editable, and copies the Orbit bridge into ManiFlow.
+If `conda` is missing, the setup script installs Miniconda into `/workspace/miniconda3` first. It then creates a Python 3.10 conda env named `maniflow`, clones ManiFlow to `/workspace/maniflow` if needed, installs the minimal Orbit 2D training dependencies, installs ManiFlow editable, and copies the Orbit bridge into ManiFlow.
 
 RunPod setup overrides:
 
@@ -34,6 +34,8 @@ RunPod setup overrides:
 - `MANIFLOW_DIR`: default `/workspace/maniflow`.
 - `CONDA_ENV`: default `maniflow`.
 - `PYTHON_VERSION`: default `3.10`.
+- `MINICONDA_DIR`: default `/workspace/miniconda3`; used only if `conda` is missing.
+- `MINICONDA_URL`: default Miniconda Linux x86_64 installer URL.
 
 Manual setup is also possible:
 
