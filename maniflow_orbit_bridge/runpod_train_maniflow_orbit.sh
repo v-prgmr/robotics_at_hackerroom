@@ -329,31 +329,67 @@ if is_true "${STOP_POD_ON_EXIT}"; then
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 api_key = os.environ["RUNPOD_API_KEY"]
 pod_id = os.environ["RUNPOD_POD_ID"]
-payload = {
+payload = json.dumps({
     "query": "mutation StopPod($input: PodStopInput!) { podStop(input: $input) { id desiredStatus } }",
     "variables": {"input": {"podId": pod_id}},
-}
-request = urllib.request.Request(
-    f"https://api.runpod.io/graphql?api_key={api_key}",
-    data=json.dumps(payload).encode("utf-8"),
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-try:
-    with urllib.request.urlopen(request, timeout=60) as response:
-        body = response.read().decode("utf-8")
-except urllib.error.HTTPError as exc:
-    body = exc.read().decode("utf-8", errors="replace")
-    raise RuntimeError(f"RunPod stop failed: HTTP {exc.code}: {body}") from exc
+}).encode("utf-8")
 
-print(body)
-data = json.loads(body)
-if data.get("errors"):
-    raise RuntimeError(f"RunPod stop returned errors: {data['errors']}")
+base_headers = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    # Cloudflare can reject Python's default urllib user-agent with 403/1010.
+    "User-Agent": "curl/8.0",
+}
+
+attempts = [
+    (
+        "bearer-token",
+        "https://api.runpod.io/graphql",
+        {**base_headers, "Authorization": f"Bearer {api_key}"},
+    ),
+    (
+        "query-api-key",
+        f"https://api.runpod.io/graphql?api_key={urllib.parse.quote(api_key)}",
+        base_headers,
+    ),
+]
+
+failures = []
+for label, url, headers in attempts:
+    request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        failures.append(f"{label}: HTTP {exc.code}: {body}")
+        continue
+
+    print(body)
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        failures.append(f"{label}: non-JSON response: {body}")
+        continue
+
+    if data.get("errors"):
+        failures.append(f"{label}: GraphQL errors: {data['errors']}")
+        continue
+
+    pod_stop = data.get("data", {}).get("podStop")
+    if not pod_stop:
+        failures.append(f"{label}: missing podStop response: {data}")
+        continue
+
+    print(f"RunPod stop requested: {pod_stop}")
+    break
+else:
+    raise RuntimeError("RunPod stop failed; attempts: " + " | ".join(failures))
 PY
         STOP_EXIT_CODE=$?
         set -e
