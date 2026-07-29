@@ -57,6 +57,12 @@ fi
 # shellcheck disable=SC1091
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
+if conda tos --help >/dev/null 2>&1; then
+    echo "Accepting Anaconda Terms of Service for default channels"
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+fi
+
 if [[ ! -d "${ORBIT_DIR}" ]]; then
     echo "Orbit repo not found at ${ORBIT_DIR}"
     echo "Clone it first, for example:"
