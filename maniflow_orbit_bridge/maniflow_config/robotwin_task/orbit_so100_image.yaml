@@ -1,0 +1,39 @@
+name: orbit_so100_image
+
+image_shape: &image_shape [3, 224, 224]
+shape_meta: &shape_meta
+  obs:
+    overhead:
+      shape: *image_shape
+      type: rgb
+      horizon: ${n_obs_steps}
+    left_wrist:
+      shape: *image_shape
+      type: rgb
+      horizon: ${n_obs_steps}
+    right_wrist:
+      shape: *image_shape
+      type: rgb
+      horizon: ${n_obs_steps}
+    agent_pos:
+      shape: [12]
+      type: low_dim
+      horizon: ${n_obs_steps}
+  action:
+    shape: [12]
+    horizon: ${horizon}
+
+dataset:
+  _target_: maniflow.dataset.orbit_image_dataset.OrbitImageDataset
+  zarr_path: data/orbit_so100.zarr
+  cameras:
+    - overhead
+    - left_wrist
+    - right_wrist
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.02
+  max_train_episodes: null
+  load_to_memory: false

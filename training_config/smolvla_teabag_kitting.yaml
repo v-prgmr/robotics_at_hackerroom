@@ -1,0 +1,72 @@
+# LeRobot SmolVLA training config for an Orbit-exported LeRobot dataset.
+# Run with:
+#   uv run lerobot-train --config_path training_config/smolvla_teabag_kitting.yaml
+#
+# Before training:
+#   1. Export the intermediate dataset with `bimanual-export-lerobot`.
+#   2. Update dataset.root/repo_id if you used different paths/names.
+#   3. Update output_dir if you want a different checkpoint directory.
+
+dataset:
+  repo_id: vhug/teabag_kitting_50_v1
+  root: ./dataset/teabags_kitting_50_v1_lerobot
+  episodes: null
+  revision: null
+  use_imagenet_stats: true
+  # Leave false for a local exported dataset.
+  streaming: false
+
+policy:
+  type: smolvla
+  device: cuda
+  use_amp: false
+
+  # Keep false for local training unless you intentionally want to publish to HF Hub.
+  push_to_hub: true
+  repo_id: vhug/teabag_kitting_50_v1_24bs_1700_steps
+  private: true
+
+  # Set this to a local checkpoint directory or HF model id for fine-tuning.
+  # Leave null to initialize from scratch using SmolVLA defaults.
+  pretrained_path: null
+
+  # SmolVLA defaults. Tune these after a baseline run.
+  n_obs_steps: 1
+  chunk_size: 50
+  n_action_steps: 50
+  max_state_dim: 32
+  max_action_dim: 32
+  resize_imgs_with_padding: [512, 512]
+  freeze_vision_encoder: true
+  train_expert_only: true
+  train_state_proj: true
+  optimizer_lr: 0.0001
+  scheduler_warmup_steps: 1000
+  scheduler_decay_steps: 30000
+  scheduler_decay_lr: 0.0000025
+  vlm_model_name: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
+  load_vlm_weights: false
+  compile_model: false
+
+output_dir: outputs/train/smolvla_teabag_kitting_50_v1_24b_1700s
+job_name: smolvla_teabag_kitting_50_v1_50_v1_24b_1700s
+resume: true
+seed: 1000
+
+# Start small; SmolVLA is memory-heavy. Increase after confirming GPU memory headroom.
+batch_size: 24
+num_workers: 4
+steps: 15000
+log_freq: 200
+save_checkpoint: true
+save_freq: 3000
+
+# Offline dataset training usually does not need env eval.
+eval_freq: 0
+
+wandb:
+  enable: true
+  disable_artifact: true
+  project: teabag_kitting_experiment
+  entity: proj-orbit
+  mode: online

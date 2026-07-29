@@ -1,0 +1,6 @@
+zarr==2.12.0
+numcodecs
+pandas
+pyarrow
+opencv-python
+numpy

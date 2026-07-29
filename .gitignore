@@ -4,14 +4,27 @@
 .ruff_cache/
 __pycache__/
 *.py[cod]
+.ipynb_checkpoints/
 
 .idea/
 .vscode/
 
 outputs/
 dataset/
+data/
+wandb/
+*.zarr/
+*.rrd
+*.ckpt
 *_v1/
+*_v2/
 *_lerobot/
+*_maniflow.zarr/
 trial_dataset_*/
+
+# External checkouts used during adapter development/training.
+/openpi/
+/maniflow/
+/ManiFlow_Policy/
 
 .DS_Store

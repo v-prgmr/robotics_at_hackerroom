@@ -15,6 +15,12 @@ dependencies = [
     "pynput>=1.7.7,<1.9",
     "evdev>=1.9,<2",
     "pyyaml>=6.0.1",
+    "transformers>=4.51,<4.58",
+    "huggingface-hub>=0.30,<1.0",
+    "peft>=0.15,<0.19",
+    "accelerate>=1.7,<2",
+    "wandb>=0.19,<0.25",
+    "datasets>=3.6,<5",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +35,9 @@ bimanual-find-ports = "bimanual_collection.tools.find_ports:main"
 bimanual-find-cameras = "bimanual_collection.tools.find_cameras:main"
 bimanual-calibrate = "bimanual_collection.tools.calibrate_arms:main"
 bimanual-export-lerobot = "bimanual_collection.tools.export_lerobot:main"
+bimanual-set-task = "bimanual_collection.tools.set_task:main"
+bimanual-inference = "bimanual_collection.inference:main"
+bimanual-compare-trace = "bimanual_collection.tools.compare_trace:main"
 
 [build-system]
 requires = ["hatchling"]

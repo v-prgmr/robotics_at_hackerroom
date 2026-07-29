@@ -16,14 +16,14 @@ home_positions:
     device_kind: follower
     id: right_follower
     port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA082179-if00
-    captured_at: '2026-07-20T12:15:38.719801+00:00'
+    captured_at: '2026-07-28T12:43:50.154444+00:00'
     joints:
-      shoulder_pan.pos: -12.703296703296703
-      shoulder_lift.pos: -98.5934065934066
-      elbow_flex.pos: 97.36263736263736
-      wrist_flex.pos: 78.02197802197803
-      wrist_roll.pos: 0.3076923076923077
-      gripper.pos: 1.6436554898093358
+      shoulder_pan.pos: -5.010989010989011
+      shoulder_lift.pos: -102.02197802197803
+      elbow_flex.pos: 97.45054945054945
+      wrist_flex.pos: 22.98901098901099
+      wrist_roll.pos: -0.04395604395604396
+      gripper.pos: 2.8683181225554106
   left_leader:
     device_kind: leader
     id: left_leader

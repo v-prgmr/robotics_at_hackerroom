@@ -255,6 +255,30 @@ calibration/so100_bimanual/
 └── home_positions.yaml
 ```
 
+## Live Inference Visualization
+
+`bimanual-inference` can stream runtime telemetry to Rerun while the policy is executing:
+
+```bash
+uv run bimanual-inference \
+    --config config/combined.yaml \
+    --checkpoint outputs/train/.../pretrained_model \
+    --rerun-live
+```
+
+The live viewer logs the policy camera inputs, follower joint state, commanded actions, predicted action chunks, inference latency, action age, queue depth, camera staleness, holds, and deployment state transitions. Rerun logging is handled on a bounded background queue so visualization cannot block the robot loop; if the viewer falls behind, new telemetry events are dropped and the drop count is reported at shutdown.
+
+To record the same telemetry for replay without opening a viewer:
+
+```bash
+uv run bimanual-inference \
+    --config config/combined.yaml \
+    --checkpoint outputs/train/.../pretrained_model \
+    --rerun-save outputs/inference_rerun/run.rrd
+```
+
+Use `--rerun-connect-grpc` to stream to an already-running Rerun viewer, `--rerun-camera-fps` to throttle image logging, and `--rerun-max-queue` to tune the nonblocking event queue.
+
 ## Data Layout
 
 The default backend writes a clean intermediate format:
@@ -276,6 +300,27 @@ data/bimanual/
 `timesteps.parquet` contains robot state, leader state, commanded actions, timing diagnostics, and camera references. `camera_index.parquet` maps every robot timestep to camera video frame indices and preserves original camera timestamps, frame age, stale flags, missing flags, dropped-frame counts, and disconnect state.
 
 `control_events.parquet` records clutch and pause transitions, including `left_clutch_active`, `right_clutch_active`, and `recording_paused` for debugging cycles that were intentionally not written as training samples.
+
+## Backfill Task Instructions
+
+For existing intermediate recordings, update the task/instruction stored in each `episode_metadata.json` before exporting to LeRobot:
+
+```bash
+uv run bimanual-set-task \
+    --dataset ./dataset/teabags_kitting_50_v1 \
+    --task "Pick one teabag and place it into the kitting tray."
+```
+
+Update only selected episodes with numbers, ranges, or full episode ids:
+
+```bash
+uv run bimanual-set-task \
+    --dataset ./dataset/teabags_kitting_50_v1 \
+    --task "Pick one teabag and place it into the kitting tray." \
+    --episodes 1 2 7-10 episode-000012
+```
+
+Use `--dry-run` to preview changes. Re-export with `bimanual-export-lerobot --overwrite` afterward because LeRobot stores tasks in its own metadata and frame data.
 
 ## Design Decisions
 
