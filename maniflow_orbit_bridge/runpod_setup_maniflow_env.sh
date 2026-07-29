@@ -24,6 +24,7 @@ CONDA_ENV="${CONDA_ENV:-maniflow}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 MINICONDA_DIR="${MINICONDA_DIR:-${WORKSPACE_DIR}/miniconda3}"
 MINICONDA_URL="${MINICONDA_URL:-https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh}"
+CONDA_ENV_DIR="${CONDA_ENV_DIR:-${WORKSPACE_DIR}/conda_envs/${CONDA_ENV}}"
 
 mkdir -p "${WORKSPACE_DIR}"
 
@@ -68,14 +69,15 @@ if [[ ! -d "${MANIFLOW_DIR}" ]]; then
     git clone https://github.com/allenai/maniflow.git "${MANIFLOW_DIR}"
 fi
 
-if conda env list | grep -qE "^${CONDA_ENV}[[:space:]]"; then
-    echo "Conda env '${CONDA_ENV}' already exists; reusing it."
+if [[ -d "${CONDA_ENV_DIR}" ]]; then
+    echo "Conda env already exists at ${CONDA_ENV_DIR}; reusing it."
 else
-    echo "Creating conda env '${CONDA_ENV}' with Python ${PYTHON_VERSION}"
-    conda create -y -n "${CONDA_ENV}" "python=${PYTHON_VERSION}" pip
+    echo "Creating persistent conda env at ${CONDA_ENV_DIR} with Python ${PYTHON_VERSION}"
+    mkdir -p "$(dirname "${CONDA_ENV_DIR}")"
+    conda create -y -p "${CONDA_ENV_DIR}" "python=${PYTHON_VERSION}" pip
 fi
 
-conda activate "${CONDA_ENV}"
+conda activate "${CONDA_ENV_DIR}"
 
 python -m pip install --upgrade pip setuptools wheel
 
@@ -156,6 +158,6 @@ print("zarr", zarr.__version__)
 print("transformers", transformers.__version__)
 PY
 
-echo "Setup complete. Activate with: conda activate ${CONDA_ENV}"
+echo "Setup complete. Activate with: conda activate ${CONDA_ENV_DIR}"
 echo "Place your converted dataset under: ${WORKSPACE_DIR}/dataset"
 echo "Then run: bash ${ORBIT_DIR}/maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh"

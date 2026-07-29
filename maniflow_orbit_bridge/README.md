@@ -25,7 +25,7 @@ cd /workspace/orbit
 bash maniflow_orbit_bridge/runpod_setup_maniflow_env.sh
 ```
 
-If `conda` is missing, the setup script installs Miniconda into `/workspace/miniconda3` first. It then creates a Python 3.10 conda env named `maniflow`, clones ManiFlow to `/workspace/maniflow` if needed, installs the minimal Orbit 2D training dependencies, installs ManiFlow editable, and copies the Orbit bridge into ManiFlow.
+If `conda` is missing, the setup script installs Miniconda into `/workspace/miniconda3` first. It then creates a persistent Python 3.10 conda env at `/workspace/conda_envs/maniflow`, clones ManiFlow to `/workspace/maniflow` if needed, installs the minimal Orbit 2D training dependencies, installs ManiFlow editable, and copies the Orbit bridge into ManiFlow. When the same network volume is attached to a new pod, rerunning setup reuses this env instead of recreating it.
 
 RunPod setup overrides:
 
@@ -33,6 +33,7 @@ RunPod setup overrides:
 - `ORBIT_DIR`: default `/workspace/orbit`.
 - `MANIFLOW_DIR`: default `/workspace/maniflow`.
 - `CONDA_ENV`: default `maniflow`.
+- `CONDA_ENV_DIR`: default `/workspace/conda_envs/$CONDA_ENV`; persistent env prefix reused across pod restarts.
 - `PYTHON_VERSION`: default `3.10`.
 - `MINICONDA_DIR`: default `/workspace/miniconda3`; used only if `conda` is missing.
 - `MINICONDA_URL`: default Miniconda Linux x86_64 installer URL.
@@ -219,6 +220,8 @@ Useful RunPod launcher overrides:
 - `RUN_NAME`: default `maniflow_teabags_v2`.
 - `OUTPUT_DIR`: full explicit output path, defaults to `/workspace/outputs/train/$RUN_NAME`.
 - `CONDA_ENV`: default `maniflow`.
+- `CONDA_ENV_DIR`: default `/workspace/conda_envs/$CONDA_ENV`; training activates this persistent env if present.
+- `MINICONDA_DIR`: default `/workspace/miniconda3`; used if `conda` is not already on `PATH`.
 - `GPU_DEVICE`: default `cuda:0`.
 - `BATCH_SIZE`: default `16`.
 - `NUM_WORKERS`: default `4`.

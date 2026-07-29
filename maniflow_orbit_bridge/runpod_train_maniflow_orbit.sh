@@ -42,6 +42,8 @@ RUN_NAME="${RUN_NAME:-maniflow_teabags_v2}"
 OUTPUT_DIR="${OUTPUT_DIR:-${WORKSPACE_DIR}/outputs/train/${RUN_NAME}}"
 
 CONDA_ENV="${CONDA_ENV:-maniflow}"
+CONDA_ENV_DIR="${CONDA_ENV_DIR:-${WORKSPACE_DIR}/conda_envs/${CONDA_ENV}}"
+MINICONDA_DIR="${MINICONDA_DIR:-${WORKSPACE_DIR}/miniconda3}"
 GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
@@ -77,13 +79,19 @@ if [[ ! -d "${MANIFLOW_DIR}" ]]; then
     git clone https://github.com/allenai/maniflow.git "${MANIFLOW_DIR}"
 fi
 
+if ! command -v conda >/dev/null 2>&1 && [[ -x "${MINICONDA_DIR}/bin/conda" ]]; then
+    export PATH="${MINICONDA_DIR}/bin:${PATH}"
+fi
+
 if command -v conda >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     source "$(conda info --base)/etc/profile.d/conda.sh"
-    if conda env list | grep -qE "^${CONDA_ENV}[[:space:]]"; then
+    if [[ -d "${CONDA_ENV_DIR}" ]]; then
+        conda activate "${CONDA_ENV_DIR}"
+    elif conda env list | grep -qE "^${CONDA_ENV}[[:space:]]"; then
         conda activate "${CONDA_ENV}"
     else
-        echo "Conda env '${CONDA_ENV}' not found. Create/install the ManiFlow env before training."
+        echo "Conda env not found at ${CONDA_ENV_DIR}. Create/install the ManiFlow env before training."
         exit 1
     fi
 else
