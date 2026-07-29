@@ -11,6 +11,7 @@ set -euo pipefail
 #
 # Override defaults with environment variables, for example:
 #   DATASET_NAME=teabags_kitting_50_v2_maniflow.zarr \
+#   HF_DATASET_REPO_ID=v-prgmr/teabags-kitting-50-v2-maniflow \
 #   RUN_NAME=maniflow_teabags_v2 \
 #   BATCH_SIZE=8 \
 #   LOGGING_MODE=offline \
@@ -29,6 +30,13 @@ MANIFLOW_DIR="${MANIFLOW_DIR:-${WORKSPACE_DIR}/maniflow}"
 
 DATASET_NAME="${DATASET_NAME:-teabags_kitting_50_v2_maniflow.zarr}"
 DATASET_ZARR="${DATASET_ZARR:-${WORKSPACE_DIR}/dataset/${DATASET_NAME}}"
+
+HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-}"
+HF_DATASET_REPO_TYPE="${HF_DATASET_REPO_TYPE:-dataset}"
+HF_DATASET_REVISION="${HF_DATASET_REVISION:-main}"
+HF_DATASET_PATH_IN_REPO="${HF_DATASET_PATH_IN_REPO:-${DATASET_NAME}}"
+HF_DATASET_TOKEN="${HF_DATASET_TOKEN:-${HF_TOKEN:-}}"
+HF_DATASET_FORCE_DOWNLOAD="${HF_DATASET_FORCE_DOWNLOAD:-false}"
 
 RUN_NAME="${RUN_NAME:-maniflow_teabags_v2}"
 OUTPUT_DIR="${OUTPUT_DIR:-${WORKSPACE_DIR}/outputs/train/${RUN_NAME}}"
@@ -82,9 +90,73 @@ else
     echo "conda not found; continuing with current Python environment."
 fi
 
+if [[ -n "${HF_DATASET_REPO_ID}" ]]; then
+    if [[ ! -d "${DATASET_ZARR}" ]] || is_true "${HF_DATASET_FORCE_DOWNLOAD}"; then
+        echo "Downloading ManiFlow dataset from Hugging Face Hub"
+        echo "  repo:          ${HF_DATASET_REPO_ID}"
+        echo "  path in repo:  ${HF_DATASET_PATH_IN_REPO}"
+        echo "  destination:   ${DATASET_ZARR}"
+        HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID}" \
+        HF_DATASET_REPO_TYPE="${HF_DATASET_REPO_TYPE}" \
+        HF_DATASET_REVISION="${HF_DATASET_REVISION}" \
+        HF_DATASET_PATH_IN_REPO="${HF_DATASET_PATH_IN_REPO}" \
+        HF_DATASET_TOKEN="${HF_DATASET_TOKEN}" \
+        DATASET_NAME="${DATASET_NAME}" \
+        DATASET_ZARR="${DATASET_ZARR}" \
+        python - <<'PY'
+import os
+import shutil
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+
+
+repo_id = os.environ["HF_DATASET_REPO_ID"]
+repo_type = os.environ.get("HF_DATASET_REPO_TYPE", "dataset")
+revision = os.environ.get("HF_DATASET_REVISION") or None
+path_in_repo = os.environ.get("HF_DATASET_PATH_IN_REPO", "").strip("/")
+token = os.environ.get("HF_DATASET_TOKEN") or None
+dataset_zarr = Path(os.environ["DATASET_ZARR"])
+
+dataset_zarr.parent.mkdir(parents=True, exist_ok=True)
+
+if path_in_repo in {"", "."}:
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type=repo_type,
+        revision=revision,
+        token=token,
+        local_dir=str(dataset_zarr),
+    )
+else:
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type=repo_type,
+        revision=revision,
+        token=token,
+        local_dir=str(dataset_zarr.parent),
+        allow_patterns=[f"{path_in_repo}/**"],
+    )
+    downloaded_path = dataset_zarr.parent / path_in_repo
+    if downloaded_path.resolve() != dataset_zarr.resolve():
+        if dataset_zarr.exists():
+            shutil.rmtree(dataset_zarr)
+        dataset_zarr.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(downloaded_path), str(dataset_zarr))
+
+if not dataset_zarr.is_dir():
+    raise FileNotFoundError(f"Downloaded dataset zarr not found: {dataset_zarr}")
+
+print(f"Dataset ready: {dataset_zarr}")
+PY
+    else
+        echo "Dataset already exists at ${DATASET_ZARR}; skipping HF dataset download."
+    fi
+fi
+
 if [[ ! -d "${DATASET_ZARR}" ]]; then
     echo "Dataset zarr not found: ${DATASET_ZARR}"
-    echo "Upload or copy the converted .zarr dataset into ${WORKSPACE_DIR}/dataset before running."
+    echo "Upload/copy the converted .zarr into ${WORKSPACE_DIR}/dataset, or set HF_DATASET_REPO_ID to download it from Hugging Face Hub."
     exit 1
 fi
 

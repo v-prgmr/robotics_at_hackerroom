@@ -179,15 +179,19 @@ train_maniflow_orbit_workspace.py
 
 Do not use ManiFlow's stock `train_maniflow_robotwin_workspace.py` for Orbit, because it imports pointcloud code and may require PyTorch3D even for image-only configs.
 
-On RunPod, use the launcher if your repo is at `/workspace/orbit`, ManiFlow is at `/workspace/maniflow`, and the converted zarr is under `/workspace/dataset`:
+On RunPod, use the launcher if your repo is at `/workspace/orbit` and ManiFlow is at `/workspace/maniflow`. If `HF_DATASET_REPO_ID` is set, the launcher downloads the converted `.zarr` dataset from Hugging Face Hub before training:
 
 ```bash
 cd /workspace/orbit
 
-DATASET_NAME=teabags_kitting_50_v2_maniflow.zarr \
-RUN_NAME=maniflow_teabags_v2 \
-BATCH_SIZE=16 \
-LOGGING_MODE=offline \
+export HF_TOKEN="<your-hf-token>"
+export HF_DATASET_REPO_ID="<your-hf-dataset-repo>"
+export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
+export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
+export RUN_NAME="maniflow_teabags_v2"
+export BATCH_SIZE="16"
+export LOGGING_MODE="offline"
+
 bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
 ```
 
@@ -204,6 +208,12 @@ Useful RunPod launcher overrides:
 - `MANIFLOW_DIR`: default `/workspace/maniflow`.
 - `DATASET_NAME`: default `teabags_kitting_50_v2_maniflow.zarr` under `/workspace/dataset`.
 - `DATASET_ZARR`: full explicit zarr path, overrides `DATASET_NAME`.
+- `HF_DATASET_REPO_ID`: optional HF dataset repo ID to download the zarr before training, for example `v-prgmr/teabags-kitting-50-v2-maniflow`.
+- `HF_DATASET_REPO_TYPE`: default `dataset`.
+- `HF_DATASET_REVISION`: default `main`.
+- `HF_DATASET_PATH_IN_REPO`: default `$DATASET_NAME`. Use `.` if the repo root is the zarr contents.
+- `HF_DATASET_TOKEN`: optional separate token for dataset download. Defaults to `HF_TOKEN`.
+- `HF_DATASET_FORCE_DOWNLOAD`: default `false`; set `true` to pull even when `DATASET_ZARR` already exists.
 - `RUN_NAME`: default `maniflow_teabags_v2`.
 - `OUTPUT_DIR`: full explicit output path, defaults to `/workspace/outputs/train/$RUN_NAME`.
 - `CONDA_ENV`: default `maniflow`.
@@ -227,19 +237,30 @@ Useful RunPod launcher overrides:
 - `RUNPOD_API_KEY`: required when `STOP_POD_ON_EXIT=true`.
 - `RUNPOD_POD_ID`: required when `STOP_POD_ON_EXIT=true`; RunPod may expose this automatically, otherwise set it manually.
 
-RunPod with HF upload and stop-on-success:
+RunPod with HF dataset download, artifact upload, and stop-on-success:
 
 ```bash
 cd /workspace/orbit
 
-PUSH_TO_HF=true \
-HF_REPO_ID=v-prgmr/maniflow-teabags-v2 \
-HF_TOKEN=<your-hf-token> \
-STOP_POD_ON_EXIT=true \
-RUNPOD_API_KEY=<your-runpod-api-key> \
-RUNPOD_POD_ID=<your-pod-id> \
-DATASET_NAME=teabags_kitting_50_v2_maniflow.zarr \
-RUN_NAME=maniflow_teabags_v2 \
+export HF_TOKEN="<your-hf-token>"
+export HF_DATASET_REPO_ID="<your-hf-dataset-repo>"
+export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
+export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
+export RUN_NAME="maniflow_teabags_v2"
+export BATCH_SIZE="16"
+export NUM_WORKERS="4"
+export NUM_EPOCHS="501"
+export LOGGING_MODE="online"
+
+export PUSH_TO_HF="true"
+export HF_REPO_ID="<your-hf-model-repo>"
+export HF_REPO_TYPE="model"
+export HF_REMOTE_PREFIX="runs/${RUN_NAME}"
+
+export STOP_POD_ON_EXIT="true"
+export RUNPOD_API_KEY="<your-runpod-api-key>"
+export RUNPOD_POD_ID="<your-pod-id>"
+
 bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
 ```
 
@@ -425,6 +446,13 @@ If training asks for PyTorch3D, you are using the wrong train script. Use:
 
 ```text
 train_maniflow_orbit_workspace.py
+```
+
+If `import torch` fails with `libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent`, rerun the RunPod setup script. It pins `mkl<2024.1` and `intel-openmp<2024.1` to avoid the PyTorch/MKL runtime mismatch:
+
+```bash
+cd /workspace/orbit
+bash maniflow_orbit_bridge/runpod_setup_maniflow_env.sh
 ```
 
 If Hydra cannot find the config, reinstall the bridge:

@@ -57,11 +57,15 @@ conda activate "${CONDA_ENV}"
 python -m pip install --upgrade pip setuptools wheel
 
 # Match the RunPod CUDA 12.4 image while using Python 3.10 in this env.
+# The MKL/OpenMP pins avoid PyTorch import failures like:
+#   libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
 conda install -y -c pytorch -c nvidia \
     pytorch==2.4.1 \
     torchvision \
     torchaudio \
-    pytorch-cuda=12.4
+    pytorch-cuda=12.4 \
+    "mkl<2024.1" \
+    "intel-openmp<2024.1"
 
 # Minimal dependency set for Orbit's 2D image ManiFlow path. This intentionally
 # skips PyTorch3D, flash-attn, MuJoCo, RoboTwin, DexArt, and pointcloud deps.
