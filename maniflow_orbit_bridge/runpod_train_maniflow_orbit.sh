@@ -48,6 +48,10 @@ GPU_DEVICE="${GPU_DEVICE:-}"
 BATCH_SIZE="${BATCH_SIZE:-}"
 NUM_WORKERS="${NUM_WORKERS:-}"
 NUM_EPOCHS="${NUM_EPOCHS:-}"
+TARGET_EPOCH="${TARGET_EPOCH:-}"
+LR_NUM_EPOCHS="${LR_NUM_EPOCHS:-}"
+RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
+ADVANCE_EPOCH_ON_RESUME="${ADVANCE_EPOCH_ON_RESUME:-}"
 DEBUG="${DEBUG:-}"
 LOGGING_MODE="${LOGGING_MODE:-}"
 
@@ -193,6 +197,18 @@ if [[ -n "${GPU_DEVICE}" ]]; then
 fi
 if [[ -n "${NUM_EPOCHS}" ]]; then
     HYDRA_OVERRIDES+=("training.num_epochs=${NUM_EPOCHS}")
+fi
+if [[ -n "${TARGET_EPOCH}" ]]; then
+    HYDRA_OVERRIDES+=("training.target_epoch=${TARGET_EPOCH}")
+fi
+if [[ -n "${LR_NUM_EPOCHS}" ]]; then
+    HYDRA_OVERRIDES+=("training.lr_num_epochs=${LR_NUM_EPOCHS}")
+fi
+if [[ -n "${RESUME_CHECKPOINT}" ]]; then
+    HYDRA_OVERRIDES+=("training.resume_from_checkpoint=${RESUME_CHECKPOINT}")
+fi
+if [[ -n "${ADVANCE_EPOCH_ON_RESUME}" ]]; then
+    HYDRA_OVERRIDES+=("training.advance_epoch_on_resume=${ADVANCE_EPOCH_ON_RESUME}")
 fi
 if [[ -n "${BATCH_SIZE}" ]]; then
     HYDRA_OVERRIDES+=("dataloader.batch_size=${BATCH_SIZE}")

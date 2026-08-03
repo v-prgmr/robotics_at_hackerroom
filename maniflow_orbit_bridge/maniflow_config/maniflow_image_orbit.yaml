@@ -110,9 +110,13 @@ training:
   seed: 42
   debug: false
   resume: true
+  resume_from_checkpoint: null
+  advance_epoch_on_resume: true
   lr_scheduler: cosine
+  lr_num_epochs: ${training.num_epochs}
   lr_warmup_steps: 500
   num_epochs: 151
+  target_epoch: null
   gradient_accumulate_every: 8
   use_ema: true
   rollout_every: 100
