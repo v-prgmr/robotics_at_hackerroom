@@ -1,5 +1,6 @@
 defaults:
   - robotwin_task: orbit_so100_image
+  - finetune: dense
   - _self_
 
 name: train_maniflow_image_orbit
@@ -111,7 +112,7 @@ training:
   debug: false
   resume: true
   resume_from_checkpoint: null
-  advance_epoch_on_resume: true
+  advance_epoch_on_resume: false
   lr_scheduler: cosine
   lr_num_epochs: ${training.num_epochs}
   lr_warmup_steps: 500

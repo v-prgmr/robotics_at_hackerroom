@@ -8,6 +8,9 @@ from pathlib import Path
 
 
 def _copy_file(source: Path, target: Path, *, overwrite: bool) -> None:
+    if source.resolve() == target.resolve():
+        print(f"Skipped {target}; source and target are the same file")
+        return
     if target.exists() and not overwrite:
         raise FileExistsError(f"Target exists: {target}. Pass --overwrite to replace it.")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -15,10 +18,13 @@ def _copy_file(source: Path, target: Path, *, overwrite: bool) -> None:
     print(f"Installed {target}")
 
 
-def _patch_text(text: str, *, target: Path, old: str, new: str) -> str:
+def _patch_text(text: str, *, target: Path, old: str, new: str, allow_missing: bool = False) -> str:
     if new in text:
         return text
     if old not in text:
+        if allow_missing:
+            print(f"Skipped patch for {target}; expected source block was not found and may already be customized.")
+            return text
         raise RuntimeError(f"Could not patch {target}; expected source block was not found.")
     return text.replace(old, new, 1)
 
@@ -36,9 +42,9 @@ def _patch_robotwin_workspace(package_dir: Path) -> None:
     old_loop = """        # training loop\n        log_path = os.path.join(self.output_dir, 'logs.json.txt')\n        for local_epoch_idx in range(cfg.training.num_epochs):\n"""
     new_loop = """        # training loop\n        log_path = os.path.join(self.output_dir, 'logs.json.txt')\n        if target_epoch is None:\n            epochs_to_run = cfg.training.num_epochs\n        else:\n            epochs_to_run = target_epoch - self.epoch + 1\n        print(f\"Training for {epochs_to_run} epoch(s), starting at epoch {self.epoch}\")\n        for local_epoch_idx in range(epochs_to_run):\n"""
 
-    text = _patch_text(text, target=target, old=old_resume, new=new_resume)
-    text = _patch_text(text, target=target, old=old_scheduler, new=new_scheduler)
-    text = _patch_text(text, target=target, old=old_loop, new=new_loop)
+    text = _patch_text(text, target=target, old=old_resume, new=new_resume, allow_missing=True)
+    text = _patch_text(text, target=target, old=old_scheduler, new=new_scheduler, allow_missing=True)
+    text = _patch_text(text, target=target, old=old_loop, new=new_loop, allow_missing=True)
     target.write_text(text)
     print(f"Patched {target}")
 
@@ -65,8 +71,24 @@ def install(maniflow_dir: Path, *, overwrite: bool = False) -> None:
             package_dir / "config/maniflow_image_orbit.yaml",
         ),
         (
+            source_dir / "maniflow_config/finetune/dense.yaml",
+            package_dir / "config/finetune/dense.yaml",
+        ),
+        (
+            source_dir / "maniflow_config/finetune/lora_rac.yaml",
+            package_dir / "config/finetune/lora_rac.yaml",
+        ),
+        (
             source_dir / "maniflow_config/robotwin_task/orbit_so100_image.yaml",
             package_dir / "config/robotwin_task/orbit_so100_image.yaml",
+        ),
+        (
+            source_dir / "maniflow_workspace/train_maniflow_robotwin_workspace.py",
+            package_dir / "workspace/train_maniflow_robotwin_workspace.py",
+        ),
+        (
+            source_dir / "maniflow_model/ema_model.py",
+            package_dir / "model/diffusion/ema_model.py",
         ),
         (
             source_dir / "maniflow_workspace/train_maniflow_orbit_workspace.py",

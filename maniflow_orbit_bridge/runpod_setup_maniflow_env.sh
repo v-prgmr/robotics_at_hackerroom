@@ -122,6 +122,7 @@ python -m pip install \
     "timm" \
     "diffusers==0.27.2" \
     "accelerate==0.34.2" \
+    "peft>=0.15,<0.19" \
     "transformers==4.46.1" \
     "huggingface_hub==0.25.0" \
     "safetensors==0.4.5" \

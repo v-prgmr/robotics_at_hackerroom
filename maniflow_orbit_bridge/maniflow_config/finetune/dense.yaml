@@ -1,0 +1,27 @@
+mode: dense
+
+init_from_checkpoint: null
+init_state_key: ema_model
+
+lora:
+  enabled: false
+  rank: 16
+  alpha: 16
+  dropout: 0.0
+  bias: none
+  target_modules: []
+  expected_target_count: 0
+  verify_zero_init: false
+  export_adapter: false
+  export_merged: false
+
+data:
+  rac_zarr_path: null
+  full_fraction: 1.0
+  rac_fraction: 0.0
+  shuffle_combined_microbatch: true
+
+checkpoint_selection:
+  primary_metric: val_loss
+  full_loss_reference: null
+  max_full_loss_relative_increase: null

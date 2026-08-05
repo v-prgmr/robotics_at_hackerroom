@@ -1,0 +1,29 @@
+mode: lora_rac
+
+init_from_checkpoint: ???
+init_state_key: ema_model
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 16
+  dropout: 0.0
+  bias: none
+  target_modules:
+    - final_layer.ffn_final.fc1
+    - final_layer.ffn_final.fc2
+  expected_target_count: 2
+  verify_zero_init: true
+  export_adapter: true
+  export_merged: true
+
+data:
+  rac_zarr_path: ???
+  full_fraction: 0.7
+  rac_fraction: 0.3
+  shuffle_combined_microbatch: true
+
+checkpoint_selection:
+  primary_metric: val/rac_loss
+  full_loss_reference: null
+  max_full_loss_relative_increase: null

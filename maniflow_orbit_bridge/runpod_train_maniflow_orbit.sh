@@ -54,6 +54,15 @@ RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
 ADVANCE_EPOCH_ON_RESUME="${ADVANCE_EPOCH_ON_RESUME:-}"
 DEBUG="${DEBUG:-}"
 LOGGING_MODE="${LOGGING_MODE:-}"
+FINETUNE_PRESET="${FINETUNE_PRESET:-}"
+INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
+INIT_STATE_KEY="${INIT_STATE_KEY:-}"
+RAC_DATASET_ZARR="${RAC_DATASET_ZARR:-}"
+FULL_FRACTION="${FULL_FRACTION:-}"
+RAC_FRACTION="${RAC_FRACTION:-}"
+LORA_RANK="${LORA_RANK:-}"
+LORA_ALPHA="${LORA_ALPHA:-}"
+LORA_DROPOUT="${LORA_DROPOUT:-}"
 
 PUSH_TO_HF="${PUSH_TO_HF:-false}"
 PUSH_TO_HF_ON_SUCCESS_ONLY="${PUSH_TO_HF_ON_SUCCESS_ONLY:-true}"
@@ -191,6 +200,33 @@ HYDRA_OVERRIDES=(
 
 if [[ -n "${DEBUG}" ]]; then
     HYDRA_OVERRIDES+=("training.debug=${DEBUG}")
+fi
+if [[ -n "${FINETUNE_PRESET}" ]]; then
+    HYDRA_OVERRIDES+=("finetune=${FINETUNE_PRESET}")
+fi
+if [[ -n "${INIT_CHECKPOINT}" ]]; then
+    HYDRA_OVERRIDES+=("finetune.init_from_checkpoint=${INIT_CHECKPOINT}")
+fi
+if [[ -n "${INIT_STATE_KEY}" ]]; then
+    HYDRA_OVERRIDES+=("finetune.init_state_key=${INIT_STATE_KEY}")
+fi
+if [[ -n "${RAC_DATASET_ZARR}" ]]; then
+    HYDRA_OVERRIDES+=("finetune.data.rac_zarr_path=${RAC_DATASET_ZARR}")
+fi
+if [[ -n "${FULL_FRACTION}" ]]; then
+    HYDRA_OVERRIDES+=("finetune.data.full_fraction=${FULL_FRACTION}")
+fi
+if [[ -n "${RAC_FRACTION}" ]]; then
+    HYDRA_OVERRIDES+=("finetune.data.rac_fraction=${RAC_FRACTION}")
+fi
+if [[ -n "${LORA_RANK}" ]]; then
+    HYDRA_OVERRIDES+=("finetune.lora.rank=${LORA_RANK}")
+fi
+if [[ -n "${LORA_ALPHA}" ]]; then
+    HYDRA_OVERRIDES+=("finetune.lora.alpha=${LORA_ALPHA}")
+fi
+if [[ -n "${LORA_DROPOUT}" ]]; then
+    HYDRA_OVERRIDES+=("finetune.lora.dropout=${LORA_DROPOUT}")
 fi
 if [[ -n "${GPU_DEVICE}" ]]; then
     HYDRA_OVERRIDES+=("training.device=${GPU_DEVICE}")

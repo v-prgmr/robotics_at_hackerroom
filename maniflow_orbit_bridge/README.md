@@ -228,6 +228,15 @@ Useful RunPod launcher overrides:
 - `NUM_EPOCHS`: optional; overrides YAML `training.num_epochs` only when set.
 - `DEBUG`: optional; overrides YAML `training.debug` only when set. Set `True` for a smoke run.
 - `LOGGING_MODE`: optional; overrides YAML `logging.mode` only when set.
+- `FINETUNE_PRESET`: optional Hydra finetune group. Use `lora_rac` for head-only LoRA with configurable full-demo/RaC window fractions.
+- `INIT_CHECKPOINT`: dense ManiFlow `.ckpt` used to initialize fresh LoRA adapters. Required when `FINETUNE_PRESET=lora_rac`.
+- `INIT_STATE_KEY`: checkpoint state key used for LoRA initialization. Default from YAML is `ema_model`.
+- `RAC_DATASET_ZARR`: RaC `.zarr` path. Required when `FINETUNE_PRESET=lora_rac`.
+- `FULL_FRACTION`: optional; overrides `finetune.data.full_fraction` for LoRA/RaC training.
+- `RAC_FRACTION`: optional; overrides `finetune.data.rac_fraction` for LoRA/RaC training.
+- `LORA_RANK`: optional; overrides `finetune.lora.rank`.
+- `LORA_ALPHA`: optional; overrides `finetune.lora.alpha`.
+- `LORA_DROPOUT`: optional; overrides `finetune.lora.dropout`.
 - `PUSH_TO_HF`: default `false`; set `true` to upload artifacts after training exits.
 - `PUSH_TO_HF_ON_SUCCESS_ONLY`: default `true`; skip HF upload if training failed.
 - `HF_REPO_ID`: required when `PUSH_TO_HF=true`, for example `v-prgmr/maniflow-teabags-v2`.
@@ -347,6 +356,134 @@ python train_maniflow_orbit_workspace.py \
     logging.mode=online
 ```
 
+## LoRA RaC Fine-Tune
+
+Use `finetune=lora_rac` for the controlled FlowCorrect-inspired DiTX head-only LoRA baseline. This mode initializes from a dense ManiFlow checkpoint, injects LoRA only into the final DiTX output MLP, and trains with configurable full-demo/RaC microbatch fractions. Run length is controlled by `NUM_EPOCHS` or `training.num_epochs`, like dense training.
+
+RunPod LoRA/RaC command:
+
+```bash
+cd /workspace/orbit
+
+export HF_TOKEN="<your-hf-token>"
+
+# Full-demonstration dataset. This remains the main robotwin_task dataset.
+export HF_DATASET_REPO_ID="<your-full-demo-hf-dataset-repo>"
+export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
+export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
+
+export RUN_NAME="maniflow_teabags_lora_rac_r16"
+export FINETUNE_PRESET="lora_rac"
+export INIT_CHECKPOINT="/workspace/outputs/train/base_maniflow/checkpoints/latest.ckpt"
+export INIT_STATE_KEY="ema_model"
+export RAC_DATASET_ZARR="/workspace/dataset/teabags_rac_maniflow.zarr"
+export FULL_FRACTION="0.7"
+export RAC_FRACTION="0.3"
+export NUM_EPOCHS="50"
+
+# Must be even. Fractions determine the integer full-demo/RaC allocation.
+export BATCH_SIZE="32"
+export NUM_WORKERS="4"
+export LORA_RANK="16"
+export LORA_ALPHA="16"
+export LORA_DROPOUT="0.0"
+export LOGGING_MODE="online"
+
+bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
+```
+
+Manual LoRA/RaC command from the installed ManiFlow workspace:
+
+```bash
+conda activate maniflow
+cd /workspace/maniflow/maniflow/workspace
+
+python train_maniflow_orbit_workspace.py \
+    --config-name=maniflow_image_orbit.yaml \
+    robotwin_task=orbit_so100_image \
+    robotwin_task.dataset.zarr_path=/workspace/dataset/teabags_kitting_50_v2_maniflow.zarr \
+    hydra.run.dir=/workspace/outputs/train/maniflow_teabags_lora_rac_r16 \
+    exp_name=maniflow_teabags_lora_rac_r16 \
+    finetune=lora_rac \
+    finetune.init_from_checkpoint=/workspace/outputs/train/base_maniflow/checkpoints/latest.ckpt \
+    finetune.init_state_key=ema_model \
+    finetune.data.rac_zarr_path=/workspace/dataset/teabags_rac_maniflow.zarr \
+    finetune.data.full_fraction=0.7 \
+    finetune.data.rac_fraction=0.3 \
+    finetune.lora.rank=16 \
+    finetune.lora.alpha=16 \
+    finetune.lora.dropout=0.0 \
+    training.device=cuda:0 \
+    training.num_epochs=50 \
+    training.gradient_accumulate_every=4 \
+    dataloader.batch_size=32 \
+    val_dataloader.batch_size=32 \
+    dataloader.num_workers=4 \
+    val_dataloader.num_workers=4 \
+    logging.mode=online
+```
+
+LoRA/RaC arguments:
+
+- `finetune=lora_rac`: selects the modular LoRA/RaC finetune config. Dense training uses the default `finetune=dense`.
+- `finetune.init_from_checkpoint=...`: dense `.ckpt` to initialize the base policy before injecting fresh zero-initialized LoRA adapters.
+- `finetune.init_state_key=ema_model`: loads EMA weights from the dense checkpoint by default. Use `model` only if you intentionally want non-EMA weights.
+- `finetune.data.rac_zarr_path=...`: RaC `.zarr` path. This is only required for LoRA/RaC fine-tuning.
+- `training.num_epochs=50`: number of balanced LoRA/RaC epochs to run. Each epoch contains enough mixed microbatches to cover both sources approximately once under the configured fractions, rounded up to a complete gradient-accumulation window.
+- `NUM_EPOCHS`: RunPod env-var equivalent of `training.num_epochs`.
+- `finetune.data.full_fraction`: requested full-demo fraction. The trainer converts this into an integer number of full-demo windows per microbatch.
+- `finetune.data.rac_fraction`: requested RaC fraction. The trainer converts this into an integer number of RaC windows per microbatch.
+- `finetune.lora.rank`: LoRA rank. Start with `16`; sweep `8`, `16`, `32` if needed.
+- `finetune.lora.alpha`: LoRA alpha. Start equal to rank.
+- `finetune.lora.dropout`: LoRA dropout. Start with `0.0` for the controlled baseline.
+- `dataloader.batch_size`: GPU microbatch size, not effective batch size. It must be even for LoRA/RaC mixing.
+- `training.gradient_accumulate_every`: number of microbatches per optimizer step.
+- `RESUME_CHECKPOINT`: use this only to continue an existing LoRA run. Do not combine it with `INIT_CHECKPOINT` for fresh adapter initialization.
+
+The LoRA target modules are exactly:
+
+```text
+ManiFlowTransformerImagePolicy.model.final_layer.ffn_final.fc1
+ManiFlowTransformerImagePolicy.model.final_layer.ffn_final.fc2
+```
+
+The trainer asserts exactly two `nn.Linear` targets, freezes all non-LoRA parameters, logs the targeted module names and trainable parameter count, and checks that zero-initialized LoRA initially matches the dense base output.
+
+The configured data mix is converted to integer source counts in every GPU microbatch. For your current sizes, `full=17796` and `rac=7586`, the dataset-proportional ratio is approximately `0.701/0.299`. With `dataloader.batch_size=24`, use `0.7/0.3`, which gives `17 full + 7 RaC` windows per microbatch. For example:
+
+```text
+dataloader.batch_size=24
+training.gradient_accumulate_every=5
+finetune.data.full_fraction=0.7
+finetune.data.rac_fraction=0.3
+
+per microbatch:       17 full-demo windows + 7 RaC windows
+per optimizer step:   85 full-demo windows + 35 RaC windows
+effective batch size: 120 windows
+```
+
+If you use `dataloader.batch_size=16`, the same `0.7/0.3` fractions round to `11 full + 5 RaC` windows per microbatch.
+
+Validation uses independent episode-level validation loaders and logs:
+
+```text
+val/full_loss
+val/rac_loss
+val/combined_50_50_loss
+```
+
+`val/combined_50_50_loss` is computed analytically as `0.5 * val/full_loss + 0.5 * val/rac_loss`. Checkpoint selection mirrors `val/rac_loss` into `val_loss` so the existing Top-K checkpoint manager prioritizes lower RaC validation loss. Do not select final deployment by combined validation loss alone; use autonomous robot success, subtask progress, and autonomous recovery rate.
+
+LoRA/RaC checkpoint and resume semantics:
+
+- Regular checkpoints are saved only at completed gradient-accumulation boundaries.
+- `optimizer.zero_grad()` is called once before training begins and after every completed optimizer step.
+- Checkpoints store `epoch`, `epoch_micro_step`, global `micro_step`, `optimizer_step`, optimizer state, LR scheduler state, EMA-helper state, sampler progress, and Python/NumPy/Torch/CUDA RNG states.
+- Resume reconstructs the balanced sampler from the epoch seed and logical `epoch_micro_step`, so sampled-window order is restored without trusting DataLoader prefetch position.
+- With `num_workers > 0`, stochastic image augmentations after a mid-epoch resume may differ slightly because worker processes can prefetch. Treat resume as sample-exact but not augmentation-bitwise-exact.
+- Validation loaders do not recycle data; `val_full` and `val_rac` each iterate their own held-out windows once with `shuffle=false` and `drop_last=false`.
+- A source may still be repeated if its configured fraction is too high relative to its dataset size. For roughly equal one-pass coverage per epoch, set fractions close to the dataset-size ratio.
+
 Training args and common overrides:
 
 - `--config-name=maniflow_image_orbit.yaml`: main installed Hydra config.
@@ -389,6 +526,13 @@ Task config:
 
 ```text
 /home/vrazer/workspace/orbit/maniflow/maniflow/config/robotwin_task/orbit_so100_image.yaml
+```
+
+Finetune configs:
+
+```text
+/home/vrazer/workspace/orbit/maniflow/maniflow/config/finetune/dense.yaml
+/home/vrazer/workspace/orbit/maniflow/maniflow/config/finetune/lora_rac.yaml
 ```
 
 Usually adjust these first:
@@ -435,6 +579,20 @@ outputs/train/<run_name>/
 ├── train_maniflow_orbit_workspace.log
 └── wandb/
 ```
+
+LoRA/RaC runs also create adapter and merged artifacts next to each saved checkpoint:
+
+```text
+outputs/train/<run_name>/checkpoints/
+├── latest.ckpt
+├── latest.adapters/
+│   ├── model/
+│   ├── ema_model/
+│   └── maniflow_adapter.json
+└── latest.merged.ckpt
+```
+
+Use `latest.ckpt` or another full LoRA `.ckpt` to continue LoRA training with `RESUME_CHECKPOINT`. Use `latest.merged.ckpt` for normal policy-server deployment, because it contains dense merged weights and does not require PEFT adapter loading at inference time.
 
 Smoke-test expectations:
 
