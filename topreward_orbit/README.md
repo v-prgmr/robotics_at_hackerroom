@@ -50,6 +50,8 @@ Each prefix requires one model forward. True/False probabilities are read from
 the same next-token distribution; the video is not duplicated. Prefix anchors
 and episodes are processed sequentially. The scorer rejects resume attempts
 whose model, FPS, prompts, or sampling settings do not match `config.json`.
+An episode-level progress bar reports completed episodes, throughput, and ETA;
+resumed episodes count toward the displayed total.
 
 Results are written under `/workspace/outputs/topreward_smoketest` by default:
 

@@ -24,6 +24,7 @@ python3 -m venv --system-site-packages "${VENV_DIR}"
     "pillow>=10,<13" \
     "pyarrow>=15,<23" \
     "qwen-vl-utils>=0.0.14" \
+    "tqdm>=4.66,<5" \
     "transformers>=4.57,<5"
 
 "${VENV_DIR}/bin/python" -c "import torch; assert torch.cuda.is_available(), 'CUDA is not available'; print('torch', torch.__version__, 'GPU', torch.cuda.get_device_name(0))"

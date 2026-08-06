@@ -23,6 +23,7 @@ from typing import Any
 import cv2
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -601,6 +602,7 @@ def main(argv: list[str] | None = None) -> None:
     dataset_roots = discover_dataset_roots(input_root, set(args.datasets) if args.datasets else None)
     selected_episodes = set(args.episodes) if args.episodes else None
     jobs: list[tuple[Path, Path, Path]] = []
+    completed_count = 0
     discovered_episode_names: set[str] = set()
     for dataset_root in dataset_roots:
         for episode_dir in sorted(dataset_root.glob("episode-*")):
@@ -612,6 +614,7 @@ def main(argv: list[str] | None = None) -> None:
                 try:
                     if json.loads(output_path.read_text(encoding="utf-8")).get("status") == "complete":
                         logger.info("Skipping completed %s/%s", dataset_root.name, episode_dir.name)
+                        completed_count += 1
                         continue
                 except (OSError, json.JSONDecodeError):
                     pass
@@ -633,31 +636,42 @@ def main(argv: list[str] | None = None) -> None:
             attn_implementation=args.attn_implementation,
             fps=args.fps,
         )
-        for dataset_root, episode_dir, output_path in jobs:
-            try:
-                result = score_episode(
-                    scorer,
-                    dataset_root,
-                    episode_dir,
-                    camera=args.camera,
-                    num_anchors=args.num_anchors,
-                    max_frames=args.max_frames,
-                    scoring_config=scoring_config,
-                )
-                atomic_write_json(output_path, result)
-            except Exception as exc:
-                logger.exception("Failed %s/%s", dataset_root.name, episode_dir.name)
-                atomic_write_json(
-                    output_path.with_suffix(".error.json"),
-                    {
-                        "status": "error",
-                        "dataset": dataset_root.name,
-                        "episode_id": episode_dir.name,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    },
-                )
-                if args.fail_fast:
-                    raise
+        total_count = completed_count + len(jobs)
+        with tqdm(
+            total=total_count,
+            initial=completed_count,
+            desc="TOPReward episodes",
+            unit="episode",
+            dynamic_ncols=True,
+        ) as progress:
+            for dataset_root, episode_dir, output_path in jobs:
+                progress.set_postfix_str(f"{dataset_root.name}/{episode_dir.name}")
+                try:
+                    result = score_episode(
+                        scorer,
+                        dataset_root,
+                        episode_dir,
+                        camera=args.camera,
+                        num_anchors=args.num_anchors,
+                        max_frames=args.max_frames,
+                        scoring_config=scoring_config,
+                    )
+                    atomic_write_json(output_path, result)
+                except Exception as exc:
+                    logger.exception("Failed %s/%s", dataset_root.name, episode_dir.name)
+                    atomic_write_json(
+                        output_path.with_suffix(".error.json"),
+                        {
+                            "status": "error",
+                            "dataset": dataset_root.name,
+                            "episode_id": episode_dir.name,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                    if args.fail_fast:
+                        raise
+                finally:
+                    progress.update(1)
     else:
         logger.info("No episodes require scoring; rebuilding aggregate outputs")
 
