@@ -27,20 +27,19 @@ Score one episode first:
 ```bash
 bash scripts/run_topreward_runpod.sh \
   --dataset teabags_kitting_50_v2 \
-  --episode episode-000001 \
-  --batch-size 1
+  --episode episode-000001
 ```
 
 Then resume and score everything else:
 
 ```bash
-bash scripts/run_topreward_runpod.sh --batch-size 1
+bash scripts/run_topreward_runpod.sh
 ```
 
-`--batch-size 1` is the lowest-VRAM mode and scores the two answer candidates
-sequentially. Use `--batch-size 2` only if the GPU has enough memory to score a
-True/False or Yes/No pair together. Prefix anchors and episodes are always
-processed sequentially.
+Each prefix requires one model forward. True/False probabilities are read from
+the same next-token distribution; the video is not duplicated. Prefix anchors
+and episodes are processed sequentially. The scorer rejects resume attempts
+whose model, FPS, prompts, or sampling settings do not match `config.json`.
 
 Results are written under `/workspace/outputs/topreward_smoketest` by default:
 

@@ -5,22 +5,29 @@ import pandas as pd
 
 from topreward_orbit.score_orbit_dataset import (
     aggregate_results,
-    build_arg_parser,
     build_prefix_specs,
     classify_collection,
     minmax_for_plot,
+    single_token_candidate_ids,
+    split_video_metadata,
     uniformly_spaced_indices,
 )
 
 
-def test_batch_size_defaults_to_low_vram_mode():
-    args = build_arg_parser().parse_args(["--input-root", "input", "--output-dir", "output"])
-    assert args.batch_size == 1
+class _FakeTokenizer:
+    def encode(self, text, *, add_special_tokens):
+        assert add_special_tokens is False
+        return {"prompt": [1, 2], "prompt True": [1, 2, 3], "prompt False": [1, 2, 4]}[text]
 
-    args = build_arg_parser().parse_args(
-        ["--input-root", "input", "--output-dir", "output", "--batch-size", "2"]
-    )
-    assert args.batch_size == 2
+
+def test_candidate_answers_share_one_next_token_distribution():
+    assert single_token_candidate_ids(_FakeTokenizer(), "prompt", [" True", " False"]) == [3, 4]
+
+
+def test_qwen_video_metadata_is_passed_separately():
+    videos, metadata = split_video_metadata([("video-a", {"fps": 2.0}), ("video-b", {"fps": 2.0})])
+    assert videos == ["video-a", "video-b"]
+    assert metadata == [{"fps": 2.0}, {"fps": 2.0}]
 
 
 def test_prefix_anchors_and_prefix_frames_are_independent():

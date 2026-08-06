@@ -27,6 +27,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+SCORER_VERSION = 3
 DEFAULT_PROMPT_PREFIX = (
     "The above video shows a robot manipulation trajectory that completes the following task: "
 )
@@ -195,6 +196,38 @@ def decode_selected_frames(video_path: Path, indices: Sequence[int]) -> dict[int
     return decoded
 
 
+def single_token_candidate_ids(tokenizer: Any, prompt: str, candidates: Sequence[str]) -> list[int]:
+    """Return candidate token ids, requiring one token appended to an identical prompt."""
+
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    candidate_ids = []
+    for candidate in candidates:
+        full_ids = tokenizer.encode(f"{prompt}{candidate}", add_special_tokens=False)
+        if full_ids[: len(prompt_ids)] != prompt_ids or len(full_ids) != len(prompt_ids) + 1:
+            raise ValueError(
+                f"TOPReward candidate {candidate!r} is not one token in this prompt context; "
+                "the shared-logit scorer requires single-token answers."
+            )
+        candidate_ids.append(int(full_ids[-1]))
+    return candidate_ids
+
+
+def split_video_metadata(video_inputs: Sequence[Any] | None) -> tuple[list[Any] | None, list[Any] | None]:
+    """Split qwen-vl-utils ``(video, metadata)`` pairs for the Qwen3 processor."""
+
+    if video_inputs is None:
+        return None, None
+    videos = []
+    metadata = []
+    for item in video_inputs:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError("Expected qwen-vl-utils to return (video, metadata) pairs")
+        video, video_metadata = item
+        videos.append(video)
+        metadata.append(video_metadata)
+    return videos, metadata
+
+
 class QwenTOPRewardScorer:
     """Direct-prompt TOPReward scorer using Qwen3-VL token log-probabilities."""
 
@@ -205,7 +238,6 @@ class QwenTOPRewardScorer:
         torch_dtype: str,
         attn_implementation: str | None,
         fps: float,
-        batch_size: int,
     ) -> None:
         import torch
         from torch.nn import functional
@@ -213,7 +245,7 @@ class QwenTOPRewardScorer:
 
         process_vision_info = importlib.import_module("qwen_vl_utils").process_vision_info
 
-        load_kwargs: dict[str, Any] = {"torch_dtype": torch_dtype, "device_map": "auto"}
+        load_kwargs: dict[str, Any] = {"dtype": torch_dtype, "device_map": "auto"}
         if attn_implementation:
             load_kwargs["attn_implementation"] = attn_implementation
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(model_name, **load_kwargs)
@@ -221,7 +253,6 @@ class QwenTOPRewardScorer:
         self.model.eval()
         self.model_name = model_name
         self.fps = fps
-        self.batch_size = batch_size
         self._torch = torch
         self._functional = functional
         self._process_vision_info = process_vision_info
@@ -235,58 +266,61 @@ class QwenTOPRewardScorer:
         from PIL import Image
 
         pil_frames = [Image.fromarray(frame) for frame in frames]
-        scores: list[float] = []
-        for start in range(0, len(answers), self.batch_size):
-            answer_batch = answers[start : start + self.batch_size]
-            conversations = [
-                [
+        messages = [
+            {
+                "role": "user",
+                "content": [
                     {
-                        "role": "user",
-                        "content": [
-                            {"type": "video", "video": pil_frames, "fps": self.fps},
-                            {"type": "text", "text": text},
-                        ],
-                    }
-                ]
-                for _ in answer_batch
-            ]
-            processor_messages = conversations[0] if len(conversations) == 1 else conversations
-            prompts = self.processor.apply_chat_template(
-                processor_messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            eos_token = self.processor.tokenizer.eos_token
-            if isinstance(prompts, str):
-                prompts = [prompts]
-            if eos_token is not None:
-                prompts = [prompt.split(eos_token)[0] for prompt in prompts]
-            full_texts = [f"{prompt}{answer}" for prompt, answer in zip(prompts, answer_batch, strict=True)]
-            image_inputs, video_inputs = self._process_vision_info(processor_messages)
-            inputs = self.processor(
-                text=full_texts,
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            inputs = inputs.to(self.model.device)
-            with self._torch.inference_mode():
-                outputs = self.model(**inputs)
-            logits = outputs.logits[:, -2, :]
-            target = inputs["input_ids"][:, -1]
-            log_probs = self._functional.log_softmax(logits, dim=-1)
-            scores.extend(float(value) for value in log_probs.gather(-1, target.unsqueeze(-1)).flatten())
-        return scores
+                        "type": "video",
+                        "video": pil_frames,
+                        "sample_fps": self.fps,
+                        "raw_fps": self.fps,
+                    },
+                    {"type": "text", "text": text.rstrip()},
+                ],
+            }
+        ]
+        prompt = self.processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        eos_token = self.processor.tokenizer.eos_token
+        if eos_token is not None:
+            prompt = prompt.split(eos_token)[0]
+        prompt = prompt.rstrip()
+        candidate_ids = single_token_candidate_ids(self.processor.tokenizer, prompt, answers)
+        image_patch_size = int(getattr(self.processor.image_processor, "patch_size", 16))
+        image_inputs, video_inputs_with_metadata, video_kwargs = self._process_vision_info(
+            messages,
+            return_video_kwargs=True,
+            return_video_metadata=True,
+            image_patch_size=image_patch_size,
+        )
+        video_inputs, video_metadata = split_video_metadata(video_inputs_with_metadata)
+        inputs = self.processor(
+            text=[prompt],
+            images=image_inputs,
+            videos=video_inputs,
+            video_metadata=video_metadata,
+            padding=True,
+            return_tensors="pt",
+            **video_kwargs,
+        )
+        inputs = inputs.to(self.model.device)
+        with self._torch.inference_mode():
+            outputs = self.model(**inputs)
+        next_token_log_probs = self._functional.log_softmax(outputs.logits[0, -1, :], dim=-1)
+        return [float(next_token_log_probs[token_id].item()) for token_id in candidate_ids]
 
     def score_true_false(self, frames: Sequence[np.ndarray], instruction: str) -> tuple[float, float]:
         stem = DEFAULT_PROMPT_PREFIX + DEFAULT_BOOLEAN_SUFFIX.format(instruction=instruction, answer="")
-        logp_true, logp_false = self._score_answers(frames, stem, ["True", "False"])
+        logp_true, logp_false = self._score_answers(frames, stem, [" True", " False"])
         return logp_true, logp_false
 
     def score_yes_no(self, frames: Sequence[np.ndarray], instruction: str) -> tuple[float, float]:
         stem = DEFAULT_YES_NO_SUFFIX.format(instruction=instruction, answer="")
-        logp_yes, logp_no = self._score_answers(frames, stem, ["Yes", "No"])
+        logp_yes, logp_no = self._score_answers(frames, stem, [" Yes", " No"])
         return logp_yes, logp_no
 
 
@@ -515,13 +549,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name", default=DEFAULT_MODEL)
     parser.add_argument("--num-anchors", type=int, default=15)
     parser.add_argument("--max-frames", type=int, default=16)
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        choices=[1, 2],
-        help="Candidate answers per GPU forward. Use 1 for minimum VRAM; 2 is faster but uses more VRAM.",
-    )
     parser.add_argument("--fps", type=float, default=2.0, help="Video FPS metadata passed to Qwen3-VL.")
     parser.add_argument("--torch-dtype", default="auto")
     parser.add_argument("--attn-implementation", default=None)
@@ -547,12 +574,12 @@ def main(argv: list[str] | None = None) -> None:
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     scoring_config = {
+        "scorer_version": SCORER_VERSION,
         "input_root": str(input_root),
         "model_name": args.model_name,
         "camera": args.camera,
         "num_prefix_anchors": args.num_anchors,
         "max_frames_per_prefix": args.max_frames,
-        "batch_size": args.batch_size,
         "fps": args.fps,
         "torch_dtype": args.torch_dtype,
         "attn_implementation": args.attn_implementation,
@@ -605,7 +632,6 @@ def main(argv: list[str] | None = None) -> None:
             torch_dtype=args.torch_dtype,
             attn_implementation=args.attn_implementation,
             fps=args.fps,
-            batch_size=args.batch_size,
         )
         for dataset_root, episode_dir, output_path in jobs:
             try:

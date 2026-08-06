@@ -4,6 +4,15 @@ set -euo pipefail
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 ORBIT_DIR="${ORBIT_DIR:-${WORKSPACE_DIR}/orbit}"
 VENV_DIR="${TOPREWARD_VENV:-${WORKSPACE_DIR}/venvs/orbit-topreward}"
+CACHE_DIR="${TOPREWARD_CACHE_DIR:-${WORKSPACE_DIR}/.cache}"
+
+mkdir -p "${WORKSPACE_DIR}/tmp" "${CACHE_DIR}/pip" "${CACHE_DIR}/huggingface" "${CACHE_DIR}/torch"
+export TMPDIR="${WORKSPACE_DIR}/tmp"
+export PIP_CACHE_DIR="${CACHE_DIR}/pip"
+export XDG_CACHE_HOME="${CACHE_DIR}"
+export HF_HOME="${CACHE_DIR}/huggingface"
+export HUGGINGFACE_HUB_CACHE="${CACHE_DIR}/huggingface/hub"
+export TORCH_HOME="${CACHE_DIR}/torch"
 
 python3 -m venv --system-site-packages "${VENV_DIR}"
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip
