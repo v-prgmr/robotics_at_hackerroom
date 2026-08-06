@@ -736,6 +736,25 @@ class TrainManiFlowRoboTwinWorkspace:
             train_loss = np.mean(train_losses)
             step_log['train_loss'] = train_loss
 
+            epoch_complete = True
+            if lora_rac_finetune:
+                epoch_complete = int(self.epoch_micro_step) >= int(lora_microbatches_per_epoch)
+            completed_epoch = self.epoch + 1
+            checkpoint_due = (
+                epoch_complete
+                and cfg.checkpoint.save_ckpt
+                and (completed_epoch % cfg.training.checkpoint_every) == 0
+            )
+            validation_due = (
+                RUN_VALIDATION
+                and epoch_complete
+                and (
+                    (completed_epoch % cfg.training.val_every) == 0
+                    or checkpoint_due
+                )
+            )
+            step_log['epoch'] = completed_epoch
+
             # ========= eval for this epoch ==========
             policy = self.model
             if cfg.training.use_ema:
@@ -766,7 +785,7 @@ class TrainManiFlowRoboTwinWorkspace:
                 step_log.update(runner_log)
 
             # run validation
-            if (self.epoch % cfg.training.val_every) == 0 and RUN_VALIDATION:
+            if validation_due:
                 self.model.eval()
                 if self.ema_model is not None:
                     self.ema_model.eval()
@@ -777,7 +796,7 @@ class TrainManiFlowRoboTwinWorkspace:
                         val_full_dataloader,
                         device=device,
                         cfg=cfg,
-                        desc=f"Validation full epoch {self.epoch}",
+                        desc=f"Validation full epoch {completed_epoch}",
                     )
                     val_rac_loss = _evaluate_mean_loss(
                         self.model,
@@ -785,7 +804,7 @@ class TrainManiFlowRoboTwinWorkspace:
                         val_rac_dataloader,
                         device=device,
                         cfg=cfg,
-                        desc=f"Validation RaC epoch {self.epoch}",
+                        desc=f"Validation RaC epoch {completed_epoch}",
                     )
                     if val_full_loss is not None and val_rac_loss is not None:
                         val_combined_loss = 0.5 * val_full_loss + 0.5 * val_rac_loss
@@ -806,7 +825,7 @@ class TrainManiFlowRoboTwinWorkspace:
                         val_dataloader,
                         device=device,
                         cfg=cfg,
-                        desc=f"Validation epoch {self.epoch}",
+                        desc=f"Validation epoch {completed_epoch}",
                     )
                     if val_loss is not None:
                         step_log['val_loss'] = val_loss
@@ -833,11 +852,8 @@ class TrainManiFlowRoboTwinWorkspace:
             if env_runner is None or step_log.get('test_mean_score', None) is None:
                 step_log['test_mean_score'] = - train_loss
 
-            epoch_complete = True
-            if lora_rac_finetune:
-                epoch_complete = int(self.epoch_micro_step) >= int(lora_microbatches_per_epoch)
             if epoch_complete:
-                self.epoch += 1
+                self.epoch = completed_epoch
                 self.epoch_micro_step = 0
                 if lora_rac_finetune:
                     self.sampler_state = {
@@ -853,7 +869,7 @@ class TrainManiFlowRoboTwinWorkspace:
                     }
 
             # checkpoint
-            if epoch_complete and (self.epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
+            if checkpoint_due:
 
                 if cfg.checkpoint.save_last_ckpt:
                     self.save_checkpoint()
@@ -876,11 +892,19 @@ class TrainManiFlowRoboTwinWorkspace:
                 #     save_path = f'checkpoints/{self.cfg.robotwin_task.name}_w_rgb/{self.epoch + 1}.ckpt'
 
                 # self.save_checkpoint(save_path)
-                try:
-                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-                except Exception as e:
-                    print(f"Error in getting topk ckpt path: {e}")
+                monitor_key = cfg.checkpoint.topk.monitor_key
+                if monitor_key not in metric_dict:
+                    cprint(
+                        f"Skipping Top-K checkpoint because '{monitor_key}' is unavailable",
+                        'yellow',
+                    )
                     topk_ckpt_path = None
+                else:
+                    try:
+                        topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                    except Exception as e:
+                        print(f"Error in getting topk ckpt path: {e}")
+                        topk_ckpt_path = None
 
                 if topk_ckpt_path is not None:
                     self.save_checkpoint(path=topk_ckpt_path)
