@@ -33,8 +33,18 @@ bash scripts/run_topreward_runpod.sh \
 Then resume and score everything else:
 
 ```bash
+export STOP_POD_ON_EXIT="true"
+export STOP_POD_ON_SUCCESS_ONLY="true"
+export RUNPOD_API_KEY="<your-runpod-api-key>"
+export RUNPOD_POD_ID="${POD_ID:-<your-pod-id>}"
+
 bash scripts/run_topreward_runpod.sh
 ```
+
+Automatic shutdown is opt-in. By default, the pod stops only after scoring and
+aggregate output generation succeed. Set `STOP_POD_ON_SUCCESS_ONLY=false` if it
+should also stop after a failed or interrupted run. `RUNPOD_POD_ID` falls back
+to RunPod's `POD_ID` environment variable when available.
 
 Each prefix requires one model forward. True/False probabilities are read from
 the same next-token distribution; the video is not duplicated. Prefix anchors
