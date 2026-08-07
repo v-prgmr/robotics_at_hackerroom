@@ -73,3 +73,20 @@ z(prefix_margin_change) + z(full_video_yes_no_margin)
 
 HIL episodes remain `hil_correction`; their recording `success=true` value is not
 treated as full-task success.
+
+## Browse scores in Rerun
+
+After copying the Orbit dataset and TOPReward output to the same machine, browse
+one dataset root with the existing lazy companion window:
+
+```bash
+uv run bimanual-dataset-rerun \
+  --dataset dataset/topReward_smoketest/teabags_kitting_50_v2 \
+  --topreward-dir outputs/topreward_smoketest \
+  --lazy
+```
+
+The viewer shows camera frames beside raw/interpolated TOPReward curves and
+episode-local normalized curves. Measured anchors are logged separately from
+the interpolated values. Use the companion window's Previous, Reload, and Next
+buttons or Left/Right, `r`, and `q` shortcuts.

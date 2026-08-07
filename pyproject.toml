@@ -38,6 +38,7 @@ bimanual-export-lerobot = "bimanual_collection.tools.export_lerobot:main"
 bimanual-set-task = "bimanual_collection.tools.set_task:main"
 bimanual-inference = "bimanual_collection.inference:main"
 bimanual-compare-trace = "bimanual_collection.tools.compare_trace:main"
+bimanual-dataset-rerun = "bimanual_collection.tools.dataset_rerun:main"
 
 [build-system]
 requires = ["hatchling"]
