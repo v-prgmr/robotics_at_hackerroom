@@ -97,6 +97,8 @@ if ! command -v conda >/dev/null 2>&1 && [[ -x "${MINICONDA_DIR}/bin/conda" ]]; 
 fi
 
 if command -v conda >/dev/null 2>&1; then
+    # Some Conda package hooks read optional backup variables while switching envs.
+    set +u
     # shellcheck disable=SC1091
     source "$(conda info --base)/etc/profile.d/conda.sh"
     if [[ -d "${CONDA_ENV_DIR}" ]]; then
@@ -107,6 +109,7 @@ if command -v conda >/dev/null 2>&1; then
         echo "Conda env not found at ${CONDA_ENV_DIR}. Create/install the ManiFlow env before training."
         exit 1
     fi
+    set -u
 else
     echo "conda not found; continuing with current Python environment."
 fi
