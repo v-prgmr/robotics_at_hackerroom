@@ -45,6 +45,13 @@ def _run_train(tmp_path: Path, *, train_exit=0, destroy=True, success_only=True,
     return result, train_log, destroy_log
 
 
+def test_vast_wrappers_default_to_workspace_volume():
+    expected = 'WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"'
+
+    assert expected in SETUP_SCRIPT.read_text()
+    assert expected in TRAIN_SCRIPT.read_text()
+
+
 def test_vast_setup_wrapper_uses_persistent_volume_defaults(tmp_path):
     env_log = tmp_path / "env.log"
     setup = _write_script(

@@ -14,7 +14,7 @@ is_true() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORBIT_REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-export WORKSPACE_DIR="${WORKSPACE_DIR:-/data}"
+export WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 export ORBIT_DIR="${ORBIT_DIR:-${ORBIT_REPO_DIR}}"
 export MANIFLOW_DIR="${MANIFLOW_DIR:-${WORKSPACE_DIR}/maniflow}"
 export MINICONDA_DIR="${MINICONDA_DIR:-${WORKSPACE_DIR}/miniconda3}"
