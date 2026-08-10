@@ -96,7 +96,6 @@ else
 fi
 
 conda activate "${CONDA_ENV_DIR}"
-set -u
 
 python -m pip install --upgrade pip setuptools wheel
 
@@ -110,6 +109,7 @@ conda install -y -c pytorch -c nvidia \
     pytorch-cuda=12.4 \
     "mkl<2024.1" \
     "intel-openmp<2024.1"
+set -u
 
 # Minimal dependency set for Orbit's 2D image ManiFlow path. This intentionally
 # skips PyTorch3D, flash-attn, MuJoCo, RoboTwin, DexArt, and pointcloud deps.
