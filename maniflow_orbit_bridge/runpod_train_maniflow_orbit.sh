@@ -37,6 +37,10 @@ HF_DATASET_REVISION="${HF_DATASET_REVISION:-main}"
 HF_DATASET_PATH_IN_REPO="${HF_DATASET_PATH_IN_REPO:-${DATASET_NAME}}"
 HF_DATASET_TOKEN="${HF_DATASET_TOKEN:-${HF_TOKEN:-}}"
 HF_DATASET_FORCE_DOWNLOAD="${HF_DATASET_FORCE_DOWNLOAD:-false}"
+HF_DATASET_MAX_WORKERS="${HF_DATASET_MAX_WORKERS:-4}"
+HF_DATASET_DOWNLOAD_RETRIES="${HF_DATASET_DOWNLOAD_RETRIES:-3}"
+export HF_HUB_ETAG_TIMEOUT="${HF_HUB_ETAG_TIMEOUT:-60}"
+export HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-300}"
 
 RUN_NAME="${RUN_NAME:-maniflow_teabags_v2}"
 OUTPUT_DIR="${OUTPUT_DIR:-${WORKSPACE_DIR}/outputs/train/${RUN_NAME}}"
@@ -125,11 +129,14 @@ if [[ -n "${HF_DATASET_REPO_ID}" ]]; then
         HF_DATASET_REVISION="${HF_DATASET_REVISION}" \
         HF_DATASET_PATH_IN_REPO="${HF_DATASET_PATH_IN_REPO}" \
         HF_DATASET_TOKEN="${HF_DATASET_TOKEN}" \
+        HF_DATASET_MAX_WORKERS="${HF_DATASET_MAX_WORKERS}" \
+        HF_DATASET_DOWNLOAD_RETRIES="${HF_DATASET_DOWNLOAD_RETRIES}" \
         DATASET_NAME="${DATASET_NAME}" \
         DATASET_ZARR="${DATASET_ZARR}" \
         python - <<'PY'
 import os
 import shutil
+import time
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
@@ -141,26 +148,38 @@ revision = os.environ.get("HF_DATASET_REVISION") or None
 path_in_repo = os.environ.get("HF_DATASET_PATH_IN_REPO", "").strip("/")
 token = os.environ.get("HF_DATASET_TOKEN") or None
 dataset_zarr = Path(os.environ["DATASET_ZARR"])
+max_workers = max(1, int(os.environ["HF_DATASET_MAX_WORKERS"]))
+download_retries = max(1, int(os.environ["HF_DATASET_DOWNLOAD_RETRIES"]))
 
 dataset_zarr.parent.mkdir(parents=True, exist_ok=True)
 
 if path_in_repo in {"", "."}:
-    snapshot_download(
-        repo_id=repo_id,
-        repo_type=repo_type,
-        revision=revision,
-        token=token,
-        local_dir=str(dataset_zarr),
-    )
+    download_kwargs = {"local_dir": str(dataset_zarr)}
 else:
-    snapshot_download(
-        repo_id=repo_id,
-        repo_type=repo_type,
-        revision=revision,
-        token=token,
-        local_dir=str(dataset_zarr.parent),
-        allow_patterns=[f"{path_in_repo}/**"],
-    )
+    download_kwargs = {
+        "local_dir": str(dataset_zarr.parent),
+        "allow_patterns": [f"{path_in_repo}/**"],
+    }
+
+for attempt in range(1, download_retries + 1):
+    try:
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type=repo_type,
+            revision=revision,
+            token=token,
+            max_workers=max_workers,
+            **download_kwargs,
+        )
+        break
+    except Exception:
+        if attempt == download_retries:
+            raise
+        delay = 5 * attempt
+        print(f"Dataset download attempt {attempt} failed; retrying in {delay}s.")
+        time.sleep(delay)
+
+if path_in_repo not in {"", "."}:
     downloaded_path = dataset_zarr.parent / path_in_repo
     if downloaded_path.resolve() != dataset_zarr.resolve():
         if dataset_zarr.exists():

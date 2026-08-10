@@ -78,7 +78,17 @@ if [[ ! -d "${MANIFLOW_DIR}" ]]; then
 fi
 
 if [[ -d "${CONDA_ENV_DIR}" ]]; then
-    echo "Conda env already exists at ${CONDA_ENV_DIR}; reusing it."
+    if [[ ! -x "${CONDA_ENV_DIR}/bin/python" ]]; then
+        echo "Existing Conda env is invalid because ${CONDA_ENV_DIR}/bin/python is missing."
+        exit 1
+    fi
+    EXISTING_PYTHON_VERSION="$("${CONDA_ENV_DIR}/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    if [[ "${EXISTING_PYTHON_VERSION}" != "${PYTHON_VERSION}" ]]; then
+        echo "Updating Conda env Python ${EXISTING_PYTHON_VERSION} -> ${PYTHON_VERSION}"
+        conda install -y -p "${CONDA_ENV_DIR}" "python=${PYTHON_VERSION}" pip
+    else
+        echo "Conda env already exists at ${CONDA_ENV_DIR}; reusing it."
+    fi
 else
     echo "Creating persistent conda env at ${CONDA_ENV_DIR} with Python ${PYTHON_VERSION}"
     mkdir -p "$(dirname "${CONDA_ENV_DIR}")"
