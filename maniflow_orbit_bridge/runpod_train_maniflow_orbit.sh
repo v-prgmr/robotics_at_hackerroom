@@ -10,7 +10,7 @@ set -euo pipefail
 #   /workspace/outputs/train/<run_name>/   training outputs/checkpoints
 #
 # Runtime paths and HF repos can be set with environment variables, for example:
-#   DATASET_NAME=teabags_kitting_50_v2_maniflow.zarr \
+#   DATASET_NAME=teabags_kitting_full_topreward_maniflow.zarr \
 #   HF_DATASET_REPO_ID=v-prgmr/teabags-kitting-50-v2-maniflow \
 #   RUN_NAME=maniflow_teabags_v2 \
 #   bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
@@ -28,7 +28,7 @@ WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 ORBIT_DIR="${ORBIT_DIR:-${WORKSPACE_DIR}/orbit}"
 MANIFLOW_DIR="${MANIFLOW_DIR:-${WORKSPACE_DIR}/maniflow}"
 
-DATASET_NAME="${DATASET_NAME:-teabags_kitting_50_v2_maniflow.zarr}"
+DATASET_NAME="${DATASET_NAME:-teabags_kitting_full_topreward_maniflow.zarr}"
 DATASET_ZARR="${DATASET_ZARR:-${WORKSPACE_DIR}/dataset/${DATASET_NAME}}"
 
 HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-}"
