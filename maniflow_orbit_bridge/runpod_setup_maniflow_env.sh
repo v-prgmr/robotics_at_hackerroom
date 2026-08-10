@@ -102,7 +102,7 @@ python -m pip install --upgrade pip setuptools wheel
 # Match the RunPod CUDA 12.4 image while using Python 3.10 in this env.
 # The MKL/OpenMP pins avoid PyTorch import failures like:
 #   libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
-conda install -y -c pytorch -c nvidia \
+conda install -y -c pytorch -c nvidia -c defaults \
     pytorch==2.4.1 \
     torchvision \
     torchaudio \
