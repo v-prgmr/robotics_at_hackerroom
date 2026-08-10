@@ -18,7 +18,8 @@ keypoint_visible_rate: 1.0
 obs_as_global_cond: true
 
 policy:
-  _target_: maniflow.policy.maniflow_image_policy.ManiFlowTransformerImagePolicy
+  _target_: maniflow.policy.topreward_maniflow_image_policy.TopRewardManiFlowTransformerImagePolicy
+  topreward_weighting: flow
   block_type: DiTX
   n_layer: 12
   n_head: 8

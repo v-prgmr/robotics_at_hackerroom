@@ -25,7 +25,7 @@ shape_meta: &shape_meta
 
 dataset:
   _target_: maniflow.dataset.orbit_image_dataset.OrbitImageDataset
-  zarr_path: data/orbit_so100.zarr
+  zarr_path: data/teabags_kitting_full_topreward_maniflow.zarr
   cameras:
     - overhead
     - left_wrist

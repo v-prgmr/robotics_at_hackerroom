@@ -49,7 +49,7 @@ class OrbitImageDataset(BaseDataset):
         self.task_names = self._load_task_names()
 
         cprint(f"Loading OrbitImageDataset from {self.zarr_path}", "green")
-        buffer_keys = [*self.cameras, "state", "action", "task_index"]
+        buffer_keys = [*self.cameras, "state", "action", "task_index", "topreward_weight", "action_valid"]
         if load_to_memory:
             self.replay_buffer = ReplayBuffer.copy_from_path(self.zarr_path, keys=buffer_keys)
         else:
@@ -96,7 +96,7 @@ class OrbitImageDataset(BaseDataset):
             sequence_length=self.horizon,
             pad_before=self.pad_before,
             pad_after=self.pad_after,
-            keys=[*self.cameras, "state", "action", "task_index"],
+            keys=[*self.cameras, "state", "action", "task_index", "topreward_weight", "action_valid"],
             episode_mask=~self.train_mask,
         )
         val_set.train_mask = ~self.train_mask
@@ -114,7 +114,7 @@ class OrbitImageDataset(BaseDataset):
     def __len__(self) -> int:
         return len(self.sampler)
 
-    def _sample_to_data(self, sample):
+    def _sample_to_data(self, sample, action_valid_mask):
         obs = {
             "agent_pos": sample["state"].astype(np.float32),
         }
@@ -126,9 +126,14 @@ class OrbitImageDataset(BaseDataset):
         return {
             "obs": obs,
             "action": sample["action"].astype(np.float32),
+            "topreward_weight": sample["topreward_weight"].astype(np.float32),
+            "action_valid_mask": sample["action_valid"].astype(bool) & action_valid_mask,
         }
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         sample = self.sampler.sample_sequence(idx)
-        data = self._sample_to_data(sample)
+        _, _, sample_start_idx, sample_end_idx = self.sampler.indices[idx]
+        action_valid_mask = np.zeros(self.horizon, dtype=bool)
+        action_valid_mask[sample_start_idx:sample_end_idx] = True
+        data = self._sample_to_data(sample, action_valid_mask)
         return _to_torch_preserve_strings(data)

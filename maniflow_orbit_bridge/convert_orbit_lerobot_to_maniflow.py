@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ DEFAULT_CAMERAS = {
     "left_wrist": "observation.images.left_wrist",
     "right_wrist": "observation.images.right_wrist",
 }
+
+TOPREWARD_SCORE_MODES = ("raw_logp_true", "normalized_progress")
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -116,6 +119,80 @@ def _episode_output_length(length: int, frame_stride: int) -> int:
     return (length + frame_stride - 1) // frame_stride
 
 
+def compute_topreward_action_arrays(
+    *,
+    total_frames: int,
+    anchors: list[dict[str, Any]],
+    score_mode: str,
+    exponent_scale: float,
+    max_weight: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Broadcast consecutive observation-anchor deltas onto causal actions."""
+    if total_frames <= 0:
+        raise ValueError("total_frames must be positive")
+    if score_mode not in TOPREWARD_SCORE_MODES:
+        raise ValueError(f"Unsupported TOPReward score mode: {score_mode!r}")
+    if not math.isfinite(exponent_scale) or exponent_scale < 0:
+        raise ValueError("TOPReward exponent scale must be non-negative")
+    if not math.isfinite(max_weight) or max_weight <= 0:
+        raise ValueError("TOPReward max weight must be positive")
+    if len(anchors) < 2:
+        raise ValueError("TOPReward requires at least two anchors per episode")
+
+    ordered = sorted(anchors, key=lambda anchor: int(anchor["anchor_index"]))
+    anchor_indices = np.asarray([int(anchor["anchor_timestep_index"]) for anchor in ordered], dtype=np.int64)
+    raw_scores = np.asarray([float(anchor["logp_true"]) for anchor in ordered], dtype=np.float64)
+    if not np.all(np.isfinite(raw_scores)):
+        raise ValueError("TOPReward anchor logp_true values must be finite")
+    if anchor_indices[0] != 0 or anchor_indices[-1] != total_frames - 1:
+        raise ValueError(
+            "TOPReward anchors must cover the episode observation endpoints: "
+            f"expected [0, {total_frames - 1}], got [{anchor_indices[0]}, {anchor_indices[-1]}]"
+        )
+    if np.any(np.diff(anchor_indices) <= 0):
+        raise ValueError("TOPReward anchor timestep indices must be strictly increasing")
+
+    if score_mode == "normalized_progress":
+        score_range = float(raw_scores.max() - raw_scores.min())
+        scores = (raw_scores - raw_scores.min()) / score_range if score_range > 0 else np.zeros_like(raw_scores)
+    else:
+        scores = raw_scores
+
+    delta_score = np.zeros(total_frames, dtype=np.float32)
+    weight_unclipped = np.ones(total_frames, dtype=np.float32)
+    weight = np.ones(total_frames, dtype=np.float32)
+    for previous, current, delta in zip(anchor_indices[:-1], anchor_indices[1:], np.diff(scores), strict=True):
+        unclipped = math.exp(exponent_scale * float(delta))
+        delta_score[previous:current] = delta
+        weight_unclipped[previous:current] = unclipped
+        weight[previous:current] = min(unclipped, max_weight)
+
+    return delta_score, weight_unclipped, weight
+
+
+def _load_topreward_episode(
+    results_root: Path,
+    dataset_name: str,
+    episode_index: int,
+    expected_frames: int,
+) -> dict[str, Any]:
+    episode_id = f"episode-{episode_index + 1:06d}"
+    path = results_root / "episodes" / dataset_name / f"{episode_id}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing TOPReward episode result: {path}")
+    payload = _load_json(path)
+    if payload.get("status") != "complete":
+        raise ValueError(f"TOPReward result is not complete: {path}")
+    if payload.get("dataset") != dataset_name or payload.get("episode_id") != episode_id:
+        raise ValueError(f"TOPReward episode provenance mismatch: {path}")
+    if int(payload.get("num_timesteps", -1)) != expected_frames:
+        raise ValueError(
+            f"TOPReward frame count mismatch for {episode_id}: "
+            f"expected {expected_frames}, got {payload.get('num_timesteps')}"
+        )
+    return payload
+
+
 def convert(
     *,
     lerobot_root: Path,
@@ -126,12 +203,27 @@ def convert(
     max_episodes: int | None,
     overwrite: bool,
     chunk_length: int,
+    topreward_results: Path | None = None,
+    topreward_dataset: str | None = None,
+    topreward_score_mode: str = "raw_logp_true",
+    topreward_exponent_scale: float | None = None,
+    topreward_max_weight: float = 2.0,
 ) -> None:
     import numcodecs
     import zarr
 
     lerobot_root = lerobot_root.expanduser().resolve()
     output_zarr = output_zarr.expanduser().resolve()
+    if topreward_results is not None:
+        topreward_results = topreward_results.expanduser().resolve()
+        if not topreward_results.is_dir():
+            raise NotADirectoryError(f"TOPReward results directory does not exist: {topreward_results}")
+        if not topreward_dataset:
+            raise ValueError("--topreward-dataset is required with --topreward-results")
+    if topreward_score_mode not in TOPREWARD_SCORE_MODES:
+        raise ValueError(f"Unsupported TOPReward score mode: {topreward_score_mode!r}")
+    if topreward_exponent_scale is None:
+        topreward_exponent_scale = 2.0 if topreward_score_mode == "normalized_progress" else 0.2
 
     info_path = lerobot_root / "meta/info.json"
     if not info_path.exists():
@@ -222,9 +314,28 @@ def convert(
         dtype=np.int64,
         compressor=compressor,
     )
+    delta_score_array = data_group.zeros(
+        "delta_score", shape=(total_frames,), chunks=vector_chunks, dtype=np.float32, compressor=compressor
+    )
+    weight_unclipped_array = data_group.ones(
+        "weight_unclipped", shape=(total_frames,), chunks=vector_chunks, dtype=np.float32, compressor=compressor
+    )
+    topreward_weight_array = data_group.ones(
+        "topreward_weight", shape=(total_frames,), chunks=vector_chunks, dtype=np.float32, compressor=compressor
+    )
+    action_valid_array = data_group.ones(
+        "action_valid", shape=(total_frames,), chunks=vector_chunks, dtype=np.bool_, compressor=compressor
+    )
+    source_episode_index_array = data_group.zeros(
+        "source_episode_index", shape=(total_frames,), chunks=vector_chunks, dtype=np.int64, compressor=compressor
+    )
+    source_frame_index_array = data_group.zeros(
+        "source_frame_index", shape=(total_frames,), chunks=vector_chunks, dtype=np.int64, compressor=compressor
+    )
     meta_group.array("episode_ends", data=episode_ends, chunks=episode_ends.shape, dtype=np.int64)
 
     task_names: dict[int, str] = {}
+    source_episode_ids: dict[int, str] = {}
     write_start = 0
     fps = int(info["fps"])
     for episode_offset, episode in episodes.iterrows():
@@ -244,6 +355,28 @@ def convert(
 
         state_array[write_start:write_end] = _stack_vectors(episode_data["observation.state"], key="observation.state")
         action_array[write_start:write_end] = _stack_vectors(episode_data["action"], key="action")
+        source_episode_index_array[write_start:write_end] = episode_index
+        source_frame_index_array[write_start:write_end] = episode_data["frame_index"].to_numpy(dtype=np.int64)
+
+        if topreward_results is not None:
+            payload = _load_topreward_episode(
+                topreward_results,
+                str(topreward_dataset),
+                episode_index,
+                source_length,
+            )
+            delta_score, weight_unclipped, topreward_weight = compute_topreward_action_arrays(
+                total_frames=source_length,
+                anchors=payload["anchors"],
+                score_mode=topreward_score_mode,
+                exponent_scale=topreward_exponent_scale,
+                max_weight=topreward_max_weight,
+            )
+            kept = np.arange(0, source_length, frame_stride)
+            delta_score_array[write_start:write_end] = delta_score[kept]
+            weight_unclipped_array[write_start:write_end] = weight_unclipped[kept]
+            topreward_weight_array[write_start:write_end] = topreward_weight[kept]
+            source_episode_ids[episode_index] = str(payload["episode_id"])
 
         task_index = int(episode_data["task_index"].iloc[0])
         task_index_array[write_start:write_end] = task_index
@@ -281,6 +414,23 @@ def convert(
         "fps": fps,
         "state_dim": state_dim,
         "action_dim": action_dim,
+        "source_episode_ids": {str(index): episode_id for index, episode_id in sorted(source_episode_ids.items())},
+        "topreward": {
+            "enabled": topreward_results is not None,
+            "results_root": str(topreward_results) if topreward_results is not None else None,
+            "dataset": topreward_dataset,
+            "score_source": "logp_true",
+            "score_mode": topreward_score_mode,
+            "exponent_scale": topreward_exponent_scale,
+            "max_weight": topreward_max_weight,
+            "minimum_weight": None,
+            "interval": "action[a_prev:a_cur]",
+            "outside_interval": {
+                "delta_score": 0.0,
+                "weight_unclipped": 1.0,
+                "topreward_weight": 1.0,
+            },
+        },
     }
     with (output_zarr / "orbit_tasks.json").open("w", encoding="utf-8") as file:
         json.dump(task_sidecar, file, indent=2, ensure_ascii=False)
@@ -302,6 +452,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-stride", type=int, default=1, help="Keep every Nth frame from each episode.")
     parser.add_argument("--max-episodes", type=int, help="Convert only the first N episodes for smoke tests.")
     parser.add_argument("--chunk-length", type=int, default=64, help="Zarr chunk length along time dimension.")
+    parser.add_argument("--topreward-results", type=Path, help="TOPReward output directory containing episodes/.")
+    parser.add_argument("--topreward-dataset", help="Dataset key under TOPReward results/episodes/.")
+    parser.add_argument(
+        "--topreward-score-mode",
+        choices=TOPREWARD_SCORE_MODES,
+        default="raw_logp_true",
+        help="Use raw logp_true deltas (paper baseline) or episode-normalized progress (diagnostic ablation).",
+    )
+    parser.add_argument(
+        "--topreward-exponent-scale",
+        type=float,
+        help="Exponent scale. Defaults to 0.2 for raw logp_true and 2.0 for normalized progress.",
+    )
+    parser.add_argument("--topreward-max-weight", type=float, default=2.0, help="Upper weight cap.")
     parser.add_argument("--overwrite", action="store_true", help="Replace output zarr if it exists.")
     return parser
 
@@ -317,6 +481,11 @@ def main() -> None:
         max_episodes=args.max_episodes,
         overwrite=args.overwrite,
         chunk_length=args.chunk_length,
+        topreward_results=args.topreward_results,
+        topreward_dataset=args.topreward_dataset,
+        topreward_score_mode=args.topreward_score_mode,
+        topreward_exponent_scale=args.topreward_exponent_scale,
+        topreward_max_weight=args.topreward_max_weight,
     )
 
 

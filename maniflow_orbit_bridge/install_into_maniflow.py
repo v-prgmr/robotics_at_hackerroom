@@ -67,6 +67,14 @@ def install(maniflow_dir: Path, *, overwrite: bool = False) -> None:
             package_dir / "dataset/orbit_image_dataset.py",
         ),
         (
+            source_dir / "maniflow_policy/topreward_maniflow_image_policy.py",
+            package_dir / "policy/topreward_maniflow_image_policy.py",
+        ),
+        (
+            source_dir / "maniflow_policy/topreward_loss.py",
+            package_dir / "policy/topreward_loss.py",
+        ),
+        (
             source_dir / "maniflow_config/maniflow_image_orbit.yaml",
             package_dir / "config/maniflow_image_orbit.yaml",
         ),
