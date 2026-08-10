@@ -21,7 +21,7 @@ WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 ORBIT_DIR="${ORBIT_DIR:-${WORKSPACE_DIR}/orbit}"
 MANIFLOW_DIR="${MANIFLOW_DIR:-${WORKSPACE_DIR}/maniflow}"
 CONDA_ENV="${CONDA_ENV:-maniflow}"
-PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
+MANIFLOW_PYTHON_VERSION="${MANIFLOW_PYTHON_VERSION:-3.10}"
 MINICONDA_DIR="${MINICONDA_DIR:-${WORKSPACE_DIR}/miniconda3}"
 MINICONDA_URL="${MINICONDA_URL:-https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh}"
 CONDA_ENV_DIR="${CONDA_ENV_DIR:-${WORKSPACE_DIR}/conda_envs/${CONDA_ENV}}"
@@ -83,26 +83,32 @@ if [[ -d "${CONDA_ENV_DIR}" ]]; then
         exit 1
     fi
     EXISTING_PYTHON_VERSION="$("${CONDA_ENV_DIR}/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-    if [[ "${EXISTING_PYTHON_VERSION}" != "${PYTHON_VERSION}" ]]; then
-        echo "Updating Conda env Python ${EXISTING_PYTHON_VERSION} -> ${PYTHON_VERSION}"
-        conda install -y -p "${CONDA_ENV_DIR}" "python=${PYTHON_VERSION}" pip
-    else
-        echo "Conda env already exists at ${CONDA_ENV_DIR}; reusing it."
+    if [[ "${EXISTING_PYTHON_VERSION}" != "${MANIFLOW_PYTHON_VERSION}" ]]; then
+        echo "Existing Conda env uses Python ${EXISTING_PYTHON_VERSION}; ManiFlow requires ${MANIFLOW_PYTHON_VERSION}."
+        echo "Remove ${CONDA_ENV_DIR} and rerun setup."
+        exit 1
     fi
+    echo "Conda env already exists at ${CONDA_ENV_DIR}; reusing it."
 else
-    echo "Creating persistent conda env at ${CONDA_ENV_DIR} with Python ${PYTHON_VERSION}"
+    echo "Creating persistent conda env at ${CONDA_ENV_DIR} with Python ${MANIFLOW_PYTHON_VERSION}"
     mkdir -p "$(dirname "${CONDA_ENV_DIR}")"
-    conda create -y -p "${CONDA_ENV_DIR}" "python=${PYTHON_VERSION}" pip
+    conda create -y -p "${CONDA_ENV_DIR}" "python=${MANIFLOW_PYTHON_VERSION}" pip
 fi
 
-conda activate "${CONDA_ENV_DIR}"
+ENV_PYTHON="${CONDA_ENV_DIR}/bin/python"
+ACTIVE_PYTHON_VERSION="$("${ENV_PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if [[ "${ACTIVE_PYTHON_VERSION}" != "${MANIFLOW_PYTHON_VERSION}" ]]; then
+    echo "Expected Python ${MANIFLOW_PYTHON_VERSION} at ${ENV_PYTHON}, got ${ACTIVE_PYTHON_VERSION}."
+    exit 1
+fi
 
-python -m pip install --upgrade pip setuptools wheel
+"${ENV_PYTHON}" -m pip install --upgrade pip setuptools wheel
 
 # Match the RunPod CUDA 12.4 image while using Python 3.10 in this env.
 # The MKL/OpenMP pins avoid PyTorch import failures like:
 #   libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
-conda install -y -c pytorch -c nvidia -c defaults \
+conda install -y -p "${CONDA_ENV_DIR}" -c pytorch -c nvidia -c defaults \
+    "python=${MANIFLOW_PYTHON_VERSION}" \
     pytorch==2.4.1 \
     torchvision \
     torchaudio \
@@ -113,7 +119,7 @@ set -u
 
 # Minimal dependency set for Orbit's 2D image ManiFlow path. This intentionally
 # skips PyTorch3D, flash-attn, MuJoCo, RoboTwin, DexArt, and pointcloud deps.
-python -m pip install \
+"${ENV_PYTHON}" -m pip install \
     "numpy==1.24.4" \
     "scipy==1.10.1" \
     "scikit-learn==1.3.2" \
@@ -146,13 +152,13 @@ python -m pip install \
 # Upstream ManiFlow may not include this package marker, which makes
 # `pip install -e` succeed while `import maniflow` still fails.
 touch "${MANIFLOW_DIR}/maniflow/__init__.py"
-python -m pip install -e "${MANIFLOW_DIR}"
+"${ENV_PYTHON}" -m pip install -e "${MANIFLOW_DIR}"
 
-python "${ORBIT_DIR}/maniflow_orbit_bridge/install_into_maniflow.py" \
+"${ENV_PYTHON}" "${ORBIT_DIR}/maniflow_orbit_bridge/install_into_maniflow.py" \
     --maniflow-dir "${MANIFLOW_DIR}" \
     --overwrite
 
-python - <<'PY'
+"${ENV_PYTHON}" - <<'PY'
 import cv2
 import h5py
 import hydra
