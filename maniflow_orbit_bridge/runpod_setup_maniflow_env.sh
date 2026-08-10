@@ -54,6 +54,8 @@ if ! command -v conda >/dev/null 2>&1; then
     exit 1
 fi
 
+# Some Conda package hooks read optional variables while switching environments.
+set +u
 # shellcheck disable=SC1091
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
@@ -84,6 +86,7 @@ else
 fi
 
 conda activate "${CONDA_ENV_DIR}"
+set -u
 
 python -m pip install --upgrade pip setuptools wheel
 
