@@ -20,10 +20,11 @@ uv run bimanual-export-lerobot \
     --input-dir ./data/bimanual \
     --output-dir ./dataset/orbit_so100_lerobot \
     --repo-id local/orbit_so100 \
-    --fps 60 \
     --video-codec h264 \
     --encoder-threads 1
 ```
+
+The exporter derives dataset FPS from the Orbit row timestamps and converts it to the nearest integer rate supported by LeRobot. Camera FPS and robot controller FPS are not substitutes for the recorded row cadence.
 
 2. Clone and install OpenPI in a separate checkout.
 

@@ -257,6 +257,15 @@ calibration/so100_bimanual/
 
 ## Live Inference Visualization
 
+Policy trajectories are sampled independently from the robot command loop. The
+robot loop remains at `robot_fps` (normally 60 Hz), while policy knots default to
+16.57 Hz to match the measured spacing of the v2 training capture. Every robot
+tick receives a monotonic-time linear interpolation between adjacent policy
+knots. Inference requests latch and hold the request observation pose, and each
+response uses a short bridge from the latest measured pose into action 0 before
+trajectory playback begins. Configure this with `--policy-action-hz` and
+`--action-bridge-duration-s`; `--chunk-execution-mode full` is the safe default.
+
 `bimanual-inference` can stream runtime telemetry to Rerun while the policy is executing:
 
 ```bash
@@ -278,6 +287,195 @@ uv run bimanual-inference \
 ```
 
 Use `--rerun-connect-grpc` to stream to an already-running Rerun viewer, `--rerun-camera-fps` to throttle image logging, and `--rerun-max-queue` to tune the nonblocking event queue.
+
+To replay saved debug-trace images from every `run-*` under a trace directory:
+
+```bash
+uv run bimanual-trace-rerun --trace-dir outputs/maniflow_inference_debug
+```
+
+To save that replay as a Rerun recording:
+
+```bash
+uv run bimanual-trace-rerun \
+    --trace-dir outputs/maniflow_inference_debug \
+    --rerun-save outputs/maniflow_inference_debug/images.rrd \
+    --no-spawn
+```
+
+To export trace images directly to MP4 without opening Rerun:
+
+```bash
+uv run bimanual-trace-rerun \
+    --trace-dir outputs/maniflow_inference_debug/run-... \
+    --video-out outputs/maniflow_inference_debug/run.mp4 \
+    --no-rerun
+```
+
+For every run under a parent trace directory, pass an output directory:
+
+```bash
+uv run bimanual-trace-rerun \
+    --trace-dir outputs/maniflow_inference_debug \
+    --video-out outputs/maniflow_inference_debug/videos \
+    --no-rerun
+```
+
+The MP4 export tiles all cameras in each observation frame. Use `--camera overhead`, `--video-fps`, `--video-frame-limit`, `--video-tile-width`, and `--video-tile-height` to filter or resize the export.
+
+## ManiFlow HIL Corrections
+
+`bimanual-maniflow-hil` collects correction-only HIL data while a remote ManiFlow policy is running. Use this when the policy reaches a failure state and you want to recover with the leader arms, demonstrate the correct continuation, and save that intervention as a new training episode.
+
+Start the ManiFlow policy server in the ManiFlow environment first, then run HIL from the Orbit environment:
+
+```bash
+uv run bimanual-maniflow-hil \
+    --config config/combined.yaml \
+    --maniflow-server http://127.0.0.1:8765 \
+    --hil-protocol continuous \
+    --hil-pedal-backend evdev \
+    --hil-pedal-device /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd \
+    --hil-pause-code KEY_1 \
+    --hil-correction-code KEY_2 \
+    --hil-clutch-code KEY_3 \
+    --hil-arm-code space \
+    --hil-reset-code r \
+    --output-dir ./dataset/maniflow_hil_corrections
+```
+
+The HIL controls are:
+
+- `KEY_1`: pause/resume autonomous ManiFlow control.
+- `KEY_2`: from paused, enter non-recording correction setup; from setup, start recording; from recording, stop/save the correction.
+- `KEY_3`: hold clutch during setup or correction so both leaders can be recentered without moving the followers.
+- `space`: arm/start autonomy after homing or reset.
+- `r`: cancel/reset/home. If a correction is actively recording, its temporary local episode folder is discarded instead of saved.
+
+The HIL phases are:
+
+- `READY_TO_ARM`: followers are homed or held after reset; press `space` to start autonomy.
+- `AUTONOMOUS`: ManiFlow publishes action chunks and controls the followers.
+- `PAUSED`: queued ManiFlow actions are cleared, policy inference is reset, and the followers hold position.
+- `PRE_CORRECTION`: leaders control the followers with the same relative `hold_current` teleop, but no frames are recorded. Use this to recenter leaders, align gripper inputs, or move to the exact correction start state.
+- `CORRECTING`: the leaders control the followers with relative `hold_current` teleop and the correction frames are recorded.
+- `ROLLOUT_TERMINATED`: the rollout must be reset before autonomy can begin again; press `r` to cancel/reset/home, physically reset the scene, then press `space` to start a fresh rollout.
+
+Follower teleoperation remains at `robot_fps` (60 Hz), while correction rows are persisted at `policy_action_hz` (16.57 Hz for the tea-bag dataset) to match the expert demonstrations and autonomous rollout collections.
+
+Supported intervention protocols are selected with `--hil-protocol`:
+
+- `continuous` is the default and preserves the original behavior. Multiple correction windows can be collected during one physical rollout, and every correction window is saved as a separate episode.
+- `rac` enforces strict recovery-and-correction collection. One saved correction terminates the rollout; autonomous control cannot resume until the operator presses `r` to reset/home and then `space` to arm a fresh rollout.
+- `bounded` allows at most `--hil-max-interventions-per-rollout` saved corrections before terminating the rollout. The default limit is `2`; a limit of `1` behaves like `rac`.
+
+For teabag-kitting downstream-failure discovery, bounded mode with two interventions is usually the recommended compromise:
+
+```bash
+uv run bimanual-maniflow-hil \
+    --config config/combined.yaml \
+    --maniflow-server http://127.0.0.1:8765 \
+    --hil-protocol bounded \
+    --hil-max-interventions-per-rollout 2 \
+    --hil-pedal-backend evdev \
+    --hil-pedal-device /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd \
+    --hil-pause-code KEY_1 \
+    --hil-correction-code KEY_2 \
+    --hil-clutch-code KEY_3 \
+    --hil-arm-code space \
+    --hil-reset-code r \
+    --output-dir ./dataset/maniflow_hil_bounded
+```
+
+For strict RaC collection, use one correction per physical rollout:
+
+```bash
+uv run bimanual-maniflow-hil \
+    --config config/combined.yaml \
+    --maniflow-server http://127.0.0.1:8765 \
+    --hil-protocol rac \
+    --hil-pedal-backend evdev \
+    --hil-pedal-device /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd \
+    --hil-pause-code KEY_1 \
+    --hil-correction-code KEY_2 \
+    --hil-clutch-code KEY_3 \
+    --hil-arm-code space \
+    --hil-reset-code r \
+    --output-dir ./dataset/maniflow_hil_rac
+```
+
+Leader arms do not need to match the failed follower pose before takeover. When pre-correction setup starts, the current leader pose and current follower pose become the relative-control references, so leader motion is applied as a delta from wherever the leaders are resting. Hold the clutch pedal to recenter the leaders or align gripper inputs while the followers stay fixed; release it to continue from new references with no follower jump.
+
+The recommended correction workflow is:
+
+- After startup homing, press `space` to arm autonomy and start the rollout.
+- Press `KEY_1` when failure is imminent or has just occurred. This pauses autonomy and holds the followers.
+- Press `KEY_2` once to enter `PRE_CORRECTION`. Leaders now have control, but nothing is recorded.
+- Use `KEY_3` clutch as needed to recenter leaders or match leader gripper state to the follower state without moving the followers.
+- Optionally use leader control in `PRE_CORRECTION` to move the robot to the exact state where the useful recovery demonstration should begin.
+- Press `KEY_2` again to enter `CORRECTING` and start recording.
+- Demonstrate recovery, correct retry, and successful completion of the current subtask.
+- Press `KEY_2` again to stop and save the correction episode.
+- Press `r` at any time to cancel/reset/home. If a correction was recording, it is discarded and not counted. The harness returns to `READY_TO_ARM`; physically reset the scene, then press `space` to start the next rollout.
+
+Only `CORRECTING` windows are recorded. `PRE_CORRECTION` setup, autonomous ManiFlow actions, paused holds, policy action chunks, reset motion, and clutch-only recentering are intentionally not written as training labels. Empty correction windows are discarded and not counted. Each saved correction window is saved as an intermediate-format episode under `--output-dir`.
+
+When you resume autonomous control, the HIL loop clears the local action queue, clears the observation buffer, increments a policy generation id, and calls the ManiFlow runtime reset. Delayed policy responses from older generations are discarded. ManiFlow then receives fresh images and follower joint state from the corrected physical scene, so the next action chunk is conditioned on the corrected state rather than stale pre-intervention history.
+
+Every saved correction episode includes HIL metadata such as `collection_type=hil`, `hil_protocol`, `contains_autonomous_actions=false`, `intervention_index`, `rollout_intervention_count`, `prior_human_intervention`, `rollout_terminated_after_intervention`, `policy_name=maniflow`, `policy_server`, `rollout_id`, and `policy_generation_id`. Bounded episodes also include `max_interventions_per_rollout`. Optional analysis fields `failure_reason`, `subtask`, and `correction_success` are written as `null` placeholders so collection requires no live typing and can be annotated later if useful.
+
+After collecting corrections, export them to LeRobot and convert to ManiFlow zarr:
+
+To inspect the raw intermediate correction dataset before export, replay it directly in Rerun:
+
+```bash
+uv run bimanual-dataset-rerun \
+    --dataset ./dataset/maniflow_hil_bounded
+```
+
+For sequential review without loading every episode at once, use lazy mode. This opens a small companion window with `Previous`, `Reload`, and `Next` buttons; only the selected episode is decoded and pushed to Rerun. Moving to another episode clears the previously logged timestep entities and reuses the same active recording, so old episodes should not accumulate on the timeline:
+
+```bash
+uv run bimanual-dataset-rerun \
+    --dataset ./dataset/maniflow_hil_bounded \
+    --lazy
+```
+
+Keyboard shortcuts in the companion window are left/right arrows for previous/next, `r` to reload, and `q` to close the navigator.
+
+Replay one episode, save an `.rrd`, or stream to an existing viewer:
+
+```bash
+uv run bimanual-dataset-rerun \
+    --dataset ./dataset/maniflow_hil_bounded \
+    --episode episode-000001 \
+    --frame-stride 2 \
+    --rerun-save ./dataset/maniflow_hil_bounded/episode-000001.rrd
+
+uv run bimanual-dataset-rerun \
+    --dataset ./dataset/maniflow_hil_bounded \
+    --rerun-connect-grpc rerun+http://127.0.0.1:9876/proxy \
+    --no-spawn
+```
+
+`bimanual-dataset-rerun` reads `timesteps.parquet`, `episode_metadata.json`, and `videos/*.mp4` directly. It does not require LeRobot export. It logs camera frames, leader and follower joint scalars, commanded correction actions, and episode metadata.
+
+Export to LeRobot and convert to ManiFlow zarr when you are ready to train:
+
+```bash
+uv run bimanual-export-lerobot \
+    --input-dir ./dataset/maniflow_hil_corrections \
+    --output-dir ./dataset/maniflow_hil_corrections_lerobot \
+    --repo-id local/maniflow_hil_corrections \
+    --video-codec h264 \
+    --encoder-threads 4
+
+python maniflow_orbit_bridge/convert_orbit_lerobot_to_maniflow.py \
+    --lerobot-root ./dataset/maniflow_hil_corrections_lerobot \
+    --output-zarr ./dataset/maniflow_hil_corrections_maniflow.zarr \
+    --image-size 224 \
+    --overwrite
+```
 
 ## Data Layout
 
@@ -347,12 +545,13 @@ uv run bimanual-export-lerobot \
     --input-dir ./teabags_kitting_50_v1 \
     --output-dir ./teabags_kitting_50_v1_lerobot \
     --repo-id vrazer/teabags_kitting_50_v1 \
-    --fps 60 \
     --video-codec h264 \
     --encoder-threads 1
 ```
 
 `--output-dir` must not already exist unless `--overwrite` is passed.
+
+By default the exporter measures the source `monotonic_timestamp_s` cadence and uses the nearest integer FPS supported by LeRobot. It rejects an explicit `--fps` that differs from the measured row rate by more than 10%. Use `--allow-fps-mismatch` only for an intentional temporal resampling workflow.
 
 The exporter streams camera frames from MP4s instead of caching full videos in memory. `--video-codec h264 --encoder-threads 1` is the lower-memory default. `libsvtav1` is supported by LeRobot but can use much more RAM on large multi-camera exports.
 

@@ -7,8 +7,12 @@ This bridge is intentionally separate from the Orbit package. Orbit records/expo
 ## Files
 
 - `convert_orbit_lerobot_to_maniflow.py`: converts an Orbit LeRobot v3 export into a ManiFlow `.zarr` replay buffer.
+- `convert_orbit_topreward_to_maniflow.py`: merges a multi-collection Orbit container and TOPReward results into one weighted ManiFlow `.zarr`.
 - `install_into_maniflow.py`: copies Orbit-specific dataset/config/workspace files into a ManiFlow checkout.
+- `vast_setup_maniflow_env.sh`: configures the shared ManiFlow environment on a Vast.ai `/data` volume.
+- `vast_train_maniflow_orbit.sh`: runs training on Vast.ai and optionally destroys the instance afterward.
 - `maniflow_dataset/orbit_image_dataset.py`: ManiFlow dataset class for `overhead`, `left_wrist`, `right_wrist`, `state`, `action`, and language task strings.
+- `maniflow_policy/topreward_maniflow_image_policy.py`: padding-aware per-action TOPReward weighting for ManiFlow.
 - `maniflow_workspace/train_maniflow_orbit_workspace.py`: image-only trainer wrapper that avoids ManiFlow's unused PyTorch3D pointcloud import.
 - `maniflow_config/maniflow_image_orbit.yaml`: main ManiFlow Hydra config for language-conditioned 2D training.
 - `maniflow_config/robotwin_task/orbit_so100_image.yaml`: Orbit task/dataset shape config.
@@ -58,6 +62,87 @@ python -c "import torch, torchvision, timm, transformers, zarr, numba, maniflow;
 python -c "import numpy, cv2, pandas, pyarrow; print('convert ok')"
 ```
 
+## Vast.ai RTX 4090
+
+Use one on-demand RTX 4090 with the recommended Vast PyTorch template in SSH mode. Select a verified
+offer with at least 98% reliability, 64 GB system RAM, 8 allocated CPU cores, and fast local storage.
+Allocate a 40 GB container disk and a 150 GB local volume mounted at `/data`. The volume survives
+instance destruction but remains tied to that physical Vast host.
+
+Clone Orbit onto the attached volume, then run the Vast setup wrapper:
+
+```bash
+cd /data
+git clone <your-orbit-repository-url> orbit
+cd /data/orbit
+git switch topreward-maniflow-training
+
+bash maniflow_orbit_bridge/vast_setup_maniflow_env.sh
+```
+
+The wrapper reuses the provider-neutral parts of the RunPod setup while defaulting the repository,
+ManiFlow checkout, conda environment, Hugging Face cache, datasets, and outputs to `/data`. Its
+PyTorch 2.4.1/CUDA 12.4 environment supports RTX 4090; do not use this setup for RTX 5090.
+
+Configure a TOPReward run:
+
+```bash
+export HF_TOKEN="<hugging-face-token>"
+export WANDB_API_KEY="<wandb-api-key>"
+
+export HF_DATASET_REPO_ID="<dataset-repo-id>"
+export HF_DATASET_PATH_IN_REPO="."
+export DATASET_NAME="teabags_kitting_full_topreward_maniflow.zarr"
+export DATASET_ZARR="/data/dataset/${DATASET_NAME}"
+
+export INIT_CHECKPOINT="/data/checkpoints/base/epoch=0050-val_loss=0.053390.ckpt"
+export INIT_STATE_KEY="ema_model"
+export RUN_NAME="maniflow_topreward_raw_beta02"
+export OUTPUT_DIR="/data/outputs/train/${RUN_NAME}"
+
+export BATCH_SIZE=4
+export NUM_WORKERS=4
+
+export PUSH_TO_HF=true
+export HF_REPO_ID="<output-model-repo-id>"
+export HF_REPO_TYPE=model
+export HF_REMOTE_PREFIX="runs/${RUN_NAME}"
+```
+
+For automatic instance destruction after training and Hugging Face upload succeed, copy the numeric
+instance ID from the Vast instance card and export:
+
+```bash
+export VAST_API_KEY="<vast-api-key>"
+export VAST_INSTANCE_ID="<numeric-instance-id>"
+export VAST_DESTROY_ON_EXIT=true
+export VAST_DESTROY_ON_SUCCESS_ONLY=true
+```
+
+Start training:
+
+```bash
+bash maniflow_orbit_bridge/vast_train_maniflow_orbit.sh \
+    training.gradient_accumulate_every=32
+```
+
+`VAST_DESTROY_ON_EXIT` defaults to `false`. When enabled, the wrapper waits for the shared training
+launcher to finish all checkpoint and Hugging Face upload work, then calls Vast's authenticated
+`DELETE /api/v0/instances/<id>` endpoint. If training or upload fails,
+`VAST_DESTROY_ON_SUCCESS_ONLY=true` leaves the instance running for diagnosis. The attached `/data`
+volume is not deleted when the instance is destroyed.
+
+Run a smoke test without destruction first:
+
+```bash
+VAST_DESTROY_ON_EXIT=false NUM_EPOCHS=1 LOGGING_MODE=offline \
+    bash maniflow_orbit_bridge/vast_train_maniflow_orbit.sh \
+    training.gradient_accumulate_every=32 \
+    training.max_train_steps=2 \
+    training.max_val_steps=2 \
+    checkpoint.save_ckpt=false
+```
+
 ## Install Bridge Into ManiFlow
 
 Run this from the Orbit repo root:
@@ -88,20 +173,70 @@ uv run bimanual-export-lerobot \
     --input-dir ./dataset/teabags_kitting_50_v2 \
     --output-dir ./dataset/teabags_kitting_50_v2_lerobot \
     --repo-id local/teabags_kitting_50_v2 \
-    --fps 30 \
     --video-codec h264 \
     --encoder-threads 4
 ```
 
 Export notes:
 
-- `--fps 30`: use this if the cameras are 30 FPS. Avoid 60 unless you intentionally want duplicated camera frames.
+- Dataset FPS is inferred from the source row timestamps, not from camera FPS or robot controller FPS. The measured 16.57 Hz tea-bag demonstrations export at LeRobot's nearest supported integer rate, 17 FPS.
 - `--encoder-threads`: only affects video encoding, not the whole export. Use `4` or `8` first; maxing CPU threads often does not help.
 - `--video-codec h264`: safest software codec. Use `h264_nvenc` only if the machine has NVIDIA encoder support and LeRobot/FFmpeg can access it.
 
 ## Convert LeRobot To ManiFlow Zarr
 
 The converter can run in the ManiFlow conda env, or any env with `zarr`, `numcodecs`, `pandas`, `pyarrow`, `opencv-python`, and `numpy` installed.
+
+### Full TOPReward Dataset
+
+Use the direct TOPReward converter for the complete collection pair:
+
+```bash
+conda run -n maniflow python \
+    maniflow_orbit_bridge/convert_orbit_topreward_to_maniflow.py \
+    --orbit-root ./dataset/teabags_kitting_expert_rac_succ_fail_topreward \
+    --topreward-results ./dataset/topreward_run \
+    --output-zarr ./dataset/teabags_kitting_full_topreward_maniflow.zarr \
+    --image-size 224 \
+    --video-workers 3 \
+    --write-batch-size 256 \
+    --compression-level 1 \
+    --overwrite
+```
+
+This writes one 75-episode dataset containing 25 expert demonstrations, 25 HIL/RaC corrections,
+3 successful autonomous rollouts, and 22 failed autonomous rollouts. At stride `1`, the current
+source contains 76,902 timesteps. The converter validates every score sidecar and trajectory before
+creating the output, then records collection, episode, and frame provenance in the zarr sidecar.
+
+Raw `logp_true` differences, `beta=0.2`, an upper cap of `2`, flow-only policy weighting, and no lower
+weight clamp are the defaults. Use repeated `--collection NAME` options to create a controlled subset.
+
+Image conversion decodes the three cameras in parallel and writes chunk-aligned 256-frame batches.
+Lossless zstd level 1 is the default because it is substantially faster than level 5 with a modest
+storage increase. A local benchmark converted one 628-frame, three-camera episode at 224px in 2.3
+seconds, excluding process startup and dataset-wide validation.
+
+The converter atomically updates `.conversion_state.json` after every complete episode. Resume an
+interrupted optimized conversion with the same options and `--resume` instead of `--overwrite`:
+
+```bash
+conda run -n maniflow python \
+    maniflow_orbit_bridge/convert_orbit_topreward_to_maniflow.py \
+    --orbit-root ./dataset/teabags_kitting_expert_rac_succ_fail_topreward \
+    --topreward-results ./dataset/topreward_run \
+    --output-zarr ./dataset/teabags_kitting_full_topreward_maniflow.zarr \
+    --image-size 224 \
+    --video-workers 3 \
+    --write-batch-size 256 \
+    --compression-level 1 \
+    --resume
+```
+
+Outputs created by the older scalar-write converter do not contain conversion state and cannot be
+resumed. Replace those once with `--overwrite`.
+
+The older LeRobot converter below remains useful for converting one already-exported collection.
 
 If needed:
 
@@ -114,8 +249,29 @@ Full conversion:
 ```bash
 python maniflow_orbit_bridge/convert_orbit_lerobot_to_maniflow.py \
     --lerobot-root ./dataset/teabags_kitting_50_v2_lerobot \
-    --output-zarr ./dataset/teabags_kitting_50_v2_maniflow.zarr \
+    --output-zarr ./dataset/teabags_kitting_50_v2_maniflow_topreward.zarr \
+    --topreward-results ./dataset/topreward_run \
+    --topreward-dataset teabags_kitting_50_v2 \
     --image-size 224 \
+    --overwrite
+```
+
+This is the paper-faithful baseline: consecutive raw `logp_true` anchor differences are converted with
+`exp(0.2 * delta_logp_true)`, broadcast to `action[a_prev:a_cur]`, and capped above at `2`.
+Actions before the first measurable delta and at/after the final observation anchor remain neutral at `1`.
+No lower clamp is applied. Per-episode min-max normalization is reserved for within-trajectory
+evaluation/visualization and is not used by the baseline policy weighting.
+
+Explicit normalized-progress diagnostic ablation:
+
+```bash
+python maniflow_orbit_bridge/convert_orbit_lerobot_to_maniflow.py \
+    --lerobot-root ./dataset/teabags_kitting_50_v2_lerobot \
+    --output-zarr ./dataset/teabags_kitting_50_v2_maniflow_topreward_normalized.zarr \
+    --topreward-results ./dataset/topreward_run \
+    --topreward-dataset teabags_kitting_50_v2 \
+    --topreward-score-mode normalized_progress \
+    --topreward-exponent-scale 2.0 \
     --overwrite
 ```
 
@@ -140,6 +296,11 @@ Converter args:
 - `--max-episodes`: converts only the first N episodes for smoke tests.
 - `--camera`: optional camera mapping in `NAME=LEROBOT_FEATURE` form. Defaults to `overhead`, `left_wrist`, `right_wrist`.
 - `--chunk-length`: zarr chunk length along time. Default `64` is fine.
+- `--topreward-results`: TOPReward output root containing `episodes/<dataset>/episode-*.json`.
+- `--topreward-dataset`: source dataset key under the TOPReward episode results.
+- `--topreward-score-mode`: defaults to paper-baseline `raw_logp_true`; `normalized_progress` is an explicit diagnostic ablation.
+- `--topreward-exponent-scale`: defaults to `0.2` for raw log-probabilities and `2.0` for normalized progress.
+- `--topreward-max-weight`: upper-only cap, default `2.0`. No lower clamp is applied.
 - `--overwrite`: replace the output zarr if it already exists.
 
 The converter writes:
@@ -151,8 +312,14 @@ data/right_wrist   uint8 [T, 3, H, W]
 data/state         float32 [T, 12]
 data/action        float32 [T, 12]
 data/task_index    int64 [T]
+data/delta_score   float32 [T]
+data/weight_unclipped float32 [T]
+data/topreward_weight float32 [T]
+data/action_valid  bool [T]
+data/source_episode_index int64 [T]
+data/source_frame_index int64 [T]
 meta/episode_ends  int64 cumulative episode ends
-orbit_tasks.json   task-index to language string mapping
+orbit_tasks.json   task strings, provenance, and TOPReward weighting configuration
 ```
 
 Inspect a zarr dataset:
@@ -163,7 +330,7 @@ from pathlib import Path
 import json
 import zarr
 
-zpath = Path('/home/vrazer/workspace/orbit/dataset/teabags_kitting_50_v2_maniflow.zarr')
+zpath = Path('/home/vrazer/workspace/orbit/dataset/teabags_kitting_full_topreward_maniflow.zarr')
 root = zarr.open_group(str(zpath), mode='r')
 print(root.tree())
 ends = root['meta/episode_ends'][:]
@@ -171,6 +338,49 @@ print('episodes', len(ends), 'frames', int(ends[-1]))
 print(json.loads((zpath / 'orbit_tasks.json').read_text())['task_names'])
 PY
 ```
+
+## TOPReward Weighted Fine-Tuning
+
+The full conversion must exist before training:
+
+```text
+/workspace/dataset/teabags_kitting_full_topreward_maniflow.zarr
+```
+
+Start a new dense TOPReward fine-tuning run from an existing ManiFlow checkpoint with:
+
+```bash
+cd /workspace/orbit
+
+export DATASET_NAME="teabags_kitting_full_topreward_maniflow.zarr"
+export DATASET_ZARR="/workspace/dataset/${DATASET_NAME}"
+export RUN_NAME="maniflow_topreward_raw_beta02"
+export INIT_CHECKPOINT="/workspace/outputs/train/maniflow_runpod_checkpoints/epoch=0050-val_loss=0.053390.ckpt"
+export INIT_STATE_KEY="ema_model"
+
+bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
+```
+
+`INIT_CHECKPOINT` starts a fresh optimizer and scheduler from pretrained policy weights. To continue an
+interrupted TOPReward run, omit `INIT_CHECKPOINT` and set `RESUME_CHECKPOINT` to that run's
+`checkpoints/latest.ckpt` instead. Do not set both variables.
+
+The default policy setting is `policy.topreward_weighting=flow`, matching reward-weighted flow BC.
+Use `policy.topreward_weighting=both` only for the consistency-loss extension, or
+`policy.topreward_weighting=none` for an unweighted padding-masked control.
+
+Before a production run, use a short smoke run:
+
+```bash
+NUM_EPOCHS=1 LOGGING_MODE=offline \
+    bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh \
+    training.max_train_steps=2 \
+    training.max_val_steps=2 \
+    checkpoint.save_ckpt=false
+```
+
+The launcher installs the tracked Orbit bridge into the ManiFlow checkout, activates the ManiFlow conda
+environment, verifies the zarr path, and starts `train_maniflow_orbit_workspace.py` with the TOPReward policy.
 
 ## Train
 
@@ -189,14 +399,18 @@ cd /workspace/orbit
 
 export HF_TOKEN="<your-hf-token>"
 export HF_DATASET_REPO_ID="<your-hf-dataset-repo>"
-export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
-export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
+export HF_DATASET_PATH_IN_REPO="teabags_kitting_full_topreward_maniflow.zarr"
+export DATASET_NAME="teabags_kitting_full_topreward_maniflow.zarr"
 export RUN_NAME="maniflow_teabags_v2"
 
 bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
 ```
 
 The YAML config is the source of truth for training settings. The launcher only overrides YAML values when you explicitly export an override such as `BATCH_SIZE`, `NUM_EPOCHS`, `DEBUG`, `GPU_DEVICE`, `NUM_WORKERS`, or `LOGGING_MODE`, or when you pass Hydra overrides after the script command.
+
+The default policy weights flow-matching loss only. Use
+`policy.topreward_weighting=both` for the flow-plus-consistency ablation, or
+`policy.topreward_weighting=none` for a padding-masked unweighted control.
 
 The launcher writes artifacts to:
 
@@ -209,7 +423,7 @@ Useful RunPod launcher overrides:
 - `WORKSPACE_DIR`: default `/workspace`.
 - `ORBIT_DIR`: default `/workspace/orbit`.
 - `MANIFLOW_DIR`: default `/workspace/maniflow`.
-- `DATASET_NAME`: default `teabags_kitting_50_v2_maniflow.zarr` under `/workspace/dataset`.
+- `DATASET_NAME`: default `teabags_kitting_full_topreward_maniflow.zarr` under `/workspace/dataset`.
 - `DATASET_ZARR`: full explicit zarr path, overrides `DATASET_NAME`.
 - `HF_DATASET_REPO_ID`: optional HF dataset repo ID to download the zarr before training, for example `v-prgmr/teabags-kitting-50-v2-maniflow`.
 - `HF_DATASET_REPO_TYPE`: default `dataset`.
@@ -258,8 +472,8 @@ cd /workspace/orbit
 
 export HF_TOKEN="<your-hf-token>"
 export HF_DATASET_REPO_ID="<your-hf-dataset-repo>"
-export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
-export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
+export HF_DATASET_PATH_IN_REPO="teabags_kitting_full_topreward_maniflow.zarr"
+export DATASET_NAME="teabags_kitting_full_topreward_maniflow.zarr"
 export RUN_NAME="maniflow_teabags_v2"
 
 export PUSH_TO_HF="true"
@@ -294,8 +508,8 @@ git pull
 
 export HF_TOKEN="<your-hf-token>"
 export HF_DATASET_REPO_ID="<your-hf-dataset-repo>"
-export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
-export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
+export HF_DATASET_PATH_IN_REPO="teabags_kitting_full_topreward_maniflow.zarr"
+export DATASET_NAME="teabags_kitting_full_topreward_maniflow.zarr"
 export RUN_NAME="maniflow_teabags_v2_runpod_smoke"
 export DEBUG="True"
 export BATCH_SIZE="2"
@@ -328,7 +542,7 @@ Manual smoke test command:
 python train_maniflow_orbit_workspace.py \
     --config-name=maniflow_image_orbit.yaml \
     robotwin_task=orbit_so100_image \
-    robotwin_task.dataset.zarr_path=/home/vrazer/workspace/orbit/dataset/teabags_kitting_50_v2_maniflow.zarr \
+    robotwin_task.dataset.zarr_path=/home/vrazer/workspace/orbit/dataset/teabags_kitting_full_topreward_maniflow.zarr \
     hydra.run.dir=/home/vrazer/workspace/orbit/outputs/train/maniflow_teabags_v2_smoke \
     training.debug=True \
     training.device=cuda:0 \
@@ -343,7 +557,7 @@ Real training command:
 python train_maniflow_orbit_workspace.py \
     --config-name=maniflow_image_orbit.yaml \
     robotwin_task=orbit_so100_image \
-    robotwin_task.dataset.zarr_path=/home/vrazer/workspace/orbit/dataset/teabags_kitting_50_v2_maniflow.zarr \
+    robotwin_task.dataset.zarr_path=/home/vrazer/workspace/orbit/dataset/teabags_kitting_full_topreward_maniflow.zarr \
     hydra.run.dir=/home/vrazer/workspace/orbit/outputs/train/maniflow_teabags_v2 \
     exp_name=maniflow_teabags_v2 \
     training.debug=False \
@@ -369,8 +583,8 @@ export HF_TOKEN="<your-hf-token>"
 
 # Full-demonstration dataset. This remains the main robotwin_task dataset.
 export HF_DATASET_REPO_ID="<your-full-demo-hf-dataset-repo>"
-export HF_DATASET_PATH_IN_REPO="teabags_kitting_50_v2_maniflow.zarr"
-export DATASET_NAME="teabags_kitting_50_v2_maniflow.zarr"
+export HF_DATASET_PATH_IN_REPO="teabags_kitting_full_topreward_maniflow.zarr"
+export DATASET_NAME="teabags_kitting_full_topreward_maniflow.zarr"
 
 export RUN_NAME="maniflow_teabags_lora_rac_r16"
 export FINETUNE_PRESET="lora_rac"
@@ -401,7 +615,7 @@ cd /workspace/maniflow/maniflow/workspace
 python train_maniflow_orbit_workspace.py \
     --config-name=maniflow_image_orbit.yaml \
     robotwin_task=orbit_so100_image \
-    robotwin_task.dataset.zarr_path=/workspace/dataset/teabags_kitting_50_v2_maniflow.zarr \
+    robotwin_task.dataset.zarr_path=/workspace/dataset/teabags_kitting_full_topreward_maniflow.zarr \
     hydra.run.dir=/workspace/outputs/train/maniflow_teabags_lora_rac_r16 \
     exp_name=maniflow_teabags_lora_rac_r16 \
     finetune=lora_rac \
@@ -605,6 +819,58 @@ Real-training expectations:
 - `val_loss` should trend down over many epochs.
 - `train_action_mse_error` should trend down over many epochs.
 - Flat/noisy loss over 30 steps is not meaningful; flat/noisy loss over thousands of steps is a problem.
+
+## Live Robot Inference
+
+Use two processes for live testing. The ManiFlow policy stays in the ManiFlow conda env, and Orbit's robot client stays in the normal Orbit env.
+
+Copy/paste command 1: start the ManiFlow policy server in the ManiFlow env:
+
+```bash
+conda activate maniflow
+cd /home/vrazer/workspace/orbit
+
+python maniflow_orbit_bridge/maniflow_policy_server.py \
+    --checkpoint ./outputs/train/maniflow_runpod_checkpoints/epoch=0050-val_loss=0.053390.ckpt \
+    --device cuda:0 \
+    --host 127.0.0.1 \
+    --port 8765
+```
+
+Copy/paste command 2: in another terminal, run the Orbit robot client in dry-run mode:
+
+```bash
+uv run bimanual-maniflow-inference \
+    --config config/combined.yaml \
+    --maniflow-server http://127.0.0.1:8765 \
+    --task-description "Pick the rightmost tea-bag sachet from the rail with the left arm, retry if the pickup is unstable, hand it securely to the right arm, and place it perpendicular in the next available position inside the box." \
+    --camera-fps 30 \
+    --policy-action-hz 16.57 \
+    --action-bridge-duration-s 0.1 \
+    --chunk-execution-mode full \
+    --debug-trace-dir outputs/maniflow_inference_debug \
+    --rerun-live
+```
+
+The `224` size is ManiFlow's model input size, not necessarily a valid camera capture mode. The server resizes live images internally, so use camera modes your cameras can actually stream. When dry-run looks correct, remove `--dry-run` and add `--max-action-delta 0.25` for the first live robot test.
+
+Controls are the same as `bimanual-inference`: space arms/disarms policy control, `r` resets policy state and clears queued actions, `h` homes followers, and `q` emergency-stops.
+
+To capture operator-labeled autonomous rollouts without enabling Rerun, add separate dataset roots:
+
+```bash
+uv run bimanual-maniflow-inference \
+    --config config/combined.yaml \
+    --maniflow-server http://127.0.0.1:8765 \
+    --task-description "Pick and place the object." \
+    --capture-dataset \
+    --failure-output-dir dataset/maniflow_rollouts_16_57hz/failures \
+    --success-output-dir dataset/maniflow_rollouts_16_57hz/successes
+```
+
+Space arms policy control and begins a staged episode. The robot controller continues at 60 Hz, while rollout rows are sampled at `policy_action_hz` (16.57 Hz for this dataset) to match the expert demonstrations. Each selected tick records the follower state, matched cameras, and exact post-clipping command with `action_source=policy`, `action_source=request_hold`, or `action_source=hold`. Press `f` or `s` to include the current terminal tick, publish the episode to the corresponding root, and disarm/reset the policy. Unclassified episodes are discarded. Success and failure roots each use their own contiguous episode numbering.
+
+The policy server keeps the rolling `n_obs_steps` ManiFlow history and returns Orbit action chunks shaped `[n_action_steps, 12]`. The robot client still owns camera matching, stale-frame rejection, action age checks, max-delta checks, debug traces, Rerun telemetry, homing, and emergency stop behavior.
 
 ## Data Semantics
 
