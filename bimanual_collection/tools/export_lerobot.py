@@ -48,7 +48,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         required=True,
         help="LeRobot repo id to store in metadata, for example 'vrazer/teabags_kitting_50_v1'.",
     )
-    parser.add_argument("--fps", type=int, default=60, help="Robot/control FPS for the LeRobot dataset.")
+    parser.add_argument(
+        "--fps",
+        type=int,
+        help="Integer LeRobot FPS. By default, use the nearest integer to the measured source row rate.",
+    )
+    parser.add_argument(
+        "--allow-fps-mismatch",
+        action="store_true",
+        help="Allow an explicit FPS that differs from the measured source row rate by more than 10%%.",
+    )
     parser.add_argument(
         "--video-codec",
         default="h264",
@@ -81,7 +90,7 @@ def main(
     input_dir = args.input_dir.expanduser()
     output_dir = args.output_dir.expanduser()
 
-    if args.fps <= 0:
+    if args.fps is not None and args.fps <= 0:
         parser.error("--fps must be > 0")
     if args.encoder_threads < 1:
         parser.error("--encoder-threads must be >= 1")
@@ -92,6 +101,17 @@ def main(
     episodes = intermediate_episodes(input_dir)
     if not episodes:
         parser.error(f"No intermediate episodes with timesteps.parquet found in: {input_dir}")
+
+    from bimanual_collection.recording.backends.lerobot_export import measure_source_fps
+
+    source_fps = measure_source_fps(episodes)
+    fps = int(args.fps) if args.fps is not None else max(1, round(source_fps))
+    relative_error = abs(fps - source_fps) / source_fps
+    if args.fps is not None and relative_error > 0.10 and not args.allow_fps_mismatch:
+        parser.error(
+            f"--fps {fps} differs from the measured source rate {source_fps:.3f} Hz by "
+            f"{relative_error:.1%}; omit --fps to use {round(source_fps)} or pass --allow-fps-mismatch"
+        )
 
     if output_dir.exists():
         if not args.overwrite:
@@ -107,14 +127,15 @@ def main(
     print(f"Exporting {len(episodes)} episode(s) from {input_dir}")
     print(f"LeRobot output: {output_dir}")
     print(f"Repo id: {args.repo_id}")
-    print(f"FPS: {args.fps}")
+    print(f"Measured source row rate: {source_fps:.3f} Hz")
+    print(f"LeRobot FPS: {fps}")
     print(f"Video codec: {args.video_codec}")
     print(f"Encoder threads: {args.encoder_threads}")
     exporter(
         input_dir,
         output_dir,
         args.repo_id,
-        int(args.fps),
+        fps,
         vcodec=args.video_codec,
         encoder_threads=int(args.encoder_threads),
     )

@@ -2,7 +2,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bimanual_collection.recording.backends.lerobot_export import SequentialVideoFrameReader, _build_lerobot_frame
+from bimanual_collection.recording.backends.lerobot_export import (
+    SequentialVideoFrameReader,
+    _build_lerobot_frame,
+    measure_source_fps,
+)
 
 
 def test_build_lerobot_frame_concatenates_bimanual_vectors_without_timestamp():
@@ -28,6 +32,17 @@ def test_build_lerobot_frame_concatenates_bimanual_vectors_without_timestamp():
         frame["action"],
         np.asarray([20, 21, 22, 23, 24, 25, 30, 31, 32, 33, 34, 35], dtype=np.float32),
     )
+
+
+def test_measure_source_fps_uses_real_timestamp_duration(tmp_path):
+    episodes = []
+    for index, timestamps in enumerate(([10.0, 10.05, 10.10], [20.0, 20.10, 20.20]), start=1):
+        episode = tmp_path / f"episode-{index:06d}"
+        episode.mkdir()
+        pd.DataFrame({"monotonic_timestamp_s": timestamps}).to_parquet(episode / "timesteps.parquet", index=False)
+        episodes.append(episode)
+
+    assert measure_source_fps(episodes) == pytest.approx(4 / 0.3)
 
 
 def test_sequential_video_frame_reader_reads_without_full_cache(tmp_path):

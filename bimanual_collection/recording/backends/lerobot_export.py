@@ -82,6 +82,27 @@ def _build_lerobot_frame(row: Any, task: str) -> dict[str, Any]:
     }
 
 
+def measure_source_fps(episodes: list[Path]) -> float:
+    """Measure the aggregate row cadence from the source monotonic timestamps."""
+
+    total_intervals = 0
+    total_duration_s = 0.0
+    for episode in episodes:
+        timestamps = pd.read_parquet(episode / "timesteps.parquet", columns=["monotonic_timestamp_s"])[
+            "monotonic_timestamp_s"
+        ].to_numpy()
+        if len(timestamps) < 2:
+            continue
+        intervals = np.diff(timestamps)
+        if not bool(np.all(np.isfinite(intervals))) or bool(np.any(intervals <= 0)):
+            raise ValueError(f"Source timestamps must be finite and strictly increasing: {episode}")
+        total_intervals += len(intervals)
+        total_duration_s += float(timestamps[-1] - timestamps[0])
+    if total_intervals == 0 or total_duration_s <= 0:
+        raise ValueError("At least one source episode must contain two timestamped rows")
+    return total_intervals / total_duration_s
+
+
 def export_to_lerobot(
     intermediate_root: Path,
     output_root: Path,
