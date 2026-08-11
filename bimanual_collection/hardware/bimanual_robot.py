@@ -235,12 +235,12 @@ class BimanualRobot:
             clipped[key] = limit.clip(float(value)) if limit else float(value)
         return clipped
 
-    def hold_position(self) -> None:
+    def hold_position(self) -> BimanualCommandResult | None:
         """Command the last observed state if available."""
 
         if self._last_state is None:
-            return
-        self.send_actions(
+            return None
+        return self.send_actions(
             {k: v for k, v in self._last_state.left.items() if k in DEFAULT_JOINT_NAMES or k.endswith(".pos")},
             {k: v for k, v in self._last_state.right.items() if k in DEFAULT_JOINT_NAMES or k.endswith(".pos")},
         )

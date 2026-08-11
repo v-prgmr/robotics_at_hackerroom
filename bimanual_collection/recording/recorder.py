@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-import time
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from bimanual_collection.recording.backends.intermediate import IntermediateBackend, IntermediateBackendConfig
+from bimanual_collection.recording.backends.intermediate import (
+    IntermediateBackend,
+    IntermediateBackendConfig,
+)
 from bimanual_collection.recording.episode import EpisodeMetadata, TimestepSample
 
 
@@ -83,28 +87,36 @@ class EpisodeRecorder:
             return None
         return self.config.output_dir / self._episode_id
 
-    def _episode_path_in_use(self, number: int) -> bool:
+    def _episode_path_in_use(self, number: int, output_dir: Path | None = None) -> bool:
+        output_dir = output_dir or self.config.output_dir
         episode_id = f"episode-{number:06d}"
-        if (self.config.output_dir / episode_id).exists():
+        if (output_dir / episode_id).exists():
             return True
-        return any(self.config.output_dir.glob(f".{episode_id}.tmp-*"))
+        return any(output_dir.glob(f".{episode_id}.tmp-*"))
 
-    def _next_episode_number(self) -> int:
+    def _next_episode_number(self, output_dir: Path | None = None) -> int:
+        output_dir = output_dir or self.config.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
         if self.config.episode_start_number is not None:
             number = self.config.episode_start_number
-            while self._episode_path_in_use(number):
+            while self._episode_path_in_use(number, output_dir):
                 number += 1
             return number
 
         pattern = re.compile(r"^episode-(\d+)$")
         max_number = 0
-        for path in self.config.output_dir.iterdir():
+        for path in output_dir.iterdir():
             match = pattern.match(path.name)
             if match:
                 max_number = max(max_number, int(match.group(1)))
         return max_number + 1
 
-    def start(self, task_description: str | None = None, episode_id: str | None = None) -> str:
+    def start(
+        self,
+        task_description: str | None = None,
+        episode_id: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> str:
         if self._writer is not None:
             raise RuntimeError("An episode is already recording")
         if episode_id is None:
@@ -123,9 +135,19 @@ class EpisodeRecorder:
             environment=self.config.environment,
             robot_calibration=self.config.robot_calibration,
             camera_calibration=self.config.camera_calibration,
+            extra=extra or {},
         )
         self._writer = self.backend.start_episode(metadata)
         return self._episode_id
+
+    def start_deferred(self, task_description: str | None = None, extra: dict[str, Any] | None = None) -> str:
+        """Start an episode whose final dataset root and sequential ID are chosen on save."""
+
+        return self.start(
+            task_description=task_description,
+            episode_id=f"capture-{uuid.uuid4().hex}",
+            extra=extra,
+        )
 
     def add_sample(self, sample: TimestepSample) -> None:
         if self._writer is None or self._started_monotonic_s is None:
@@ -146,6 +168,33 @@ class EpisodeRecorder:
         if self._writer is None:
             raise RuntimeError("No episode is recording")
         path = self._writer.save(success=success, operator_notes=operator_notes)
+        self._writer = None
+        self._started_monotonic_s = None
+        self._episode_id = None
+        self._episode_number = None
+        self._sample_count = 0
+        return path
+
+    def stop_and_save_to(
+        self,
+        output_dir: Path,
+        *,
+        success: bool,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> Path:
+        """Publish a deferred episode with numbering local to the selected dataset root."""
+
+        if self._writer is None:
+            raise RuntimeError("No episode is recording")
+        output_dir = output_dir.expanduser()
+        episode_number = self._next_episode_number(output_dir)
+        episode_id = f"episode-{episode_number:06d}"
+        path = self._writer.save(
+            success=success,
+            output_dir=output_dir,
+            episode_id=episode_id,
+            extra_metadata=extra_metadata,
+        )
         self._writer = None
         self._started_monotonic_s = None
         self._episode_id = None

@@ -1,3 +1,4 @@
+import json
 import time
 
 import numpy as np
@@ -141,3 +142,52 @@ def test_episode_recorder_skips_existing_configured_number(tmp_path):
     assert episode_id == "episode-000052"
     assert recorder.episode_number == 52
     recorder.discard()
+
+
+def test_episode_recorder_saves_extra_metadata(tmp_path):
+    recorder = EpisodeRecorder(RecorderConfig(output_dir=tmp_path, task_description="test", camera_fps=30))
+
+    episode_id = recorder.start(episode_id="episode-extra", extra={"hil_protocol": "bounded"})
+    recorder.add_sample(make_sample(episode_id, 0))
+    path = recorder.stop_and_save()
+
+    metadata = json.loads((path / "episode_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["extra"]["hil_protocol"] == "bounded"
+    assert metadata["hil_protocol"] == "bounded"
+
+
+def test_deferred_episode_numbering_is_independent_per_destination(tmp_path):
+    staging = tmp_path / "staging"
+    successes = tmp_path / "successes"
+    failures = tmp_path / "failures"
+    recorder = EpisodeRecorder(RecorderConfig(output_dir=staging, task_description="test", camera_fps=30))
+
+    provisional_id = recorder.start_deferred(extra={"episode_type": "autonomous_rollout"})
+    recorder.add_sample(make_sample(provisional_id, 0))
+    success_path = recorder.stop_and_save_to(
+        successes,
+        success=True,
+        extra_metadata={"terminal_success": True, "termination_reason": "operator_success"},
+    )
+
+    provisional_id = recorder.start_deferred(extra={"episode_type": "autonomous_rollout"})
+    recorder.add_sample(make_sample(provisional_id, 0))
+    failure_path = recorder.stop_and_save_to(
+        failures,
+        success=False,
+        extra_metadata={"terminal_success": False, "termination_reason": "operator_failure"},
+    )
+
+    assert success_path == successes / "episode-000001"
+    assert failure_path == failures / "episode-000001"
+    success_rows = pd.read_parquet(success_path / "timesteps.parquet")
+    failure_rows = pd.read_parquet(failure_path / "timesteps.parquet")
+    assert success_rows["episode_id"].tolist() == ["episode-000001"]
+    assert failure_rows["episode_id"].tolist() == ["episode-000001"]
+    success_metadata = json.loads((success_path / "episode_metadata.json").read_text(encoding="utf-8"))
+    failure_metadata = json.loads((failure_path / "episode_metadata.json").read_text(encoding="utf-8"))
+    assert success_metadata["terminal_success"] is True
+    assert success_metadata["termination_reason"] == "operator_success"
+    assert failure_metadata["terminal_success"] is False
+    assert failure_metadata["termination_reason"] == "operator_failure"
+    assert not list(staging.glob(".*.tmp-*"))

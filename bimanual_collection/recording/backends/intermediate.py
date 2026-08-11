@@ -134,15 +134,34 @@ class IntermediateEpisodeWriter:
         self._camera_frame_to_video_index[key] = video_index
         return video_index
 
-    def save(self, success: bool | None = None, operator_notes: str | None = None) -> Path:
+    def save(
+        self,
+        success: bool | None = None,
+        operator_notes: str | None = None,
+        *,
+        output_dir: Path | None = None,
+        episode_id: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> Path:
         """Close files and atomically publish the episode directory."""
 
-        if self.final_dir.exists():
-            raise FileExistsError(f"Episode already exists: {self.final_dir}")
+        final_output_dir = output_dir or self.config.output_dir
+        final_episode_id = episode_id or self.metadata.episode_id
+        final_dir = final_output_dir / final_episode_id
+        if final_dir.exists():
+            raise FileExistsError(f"Episode already exists: {final_dir}")
         for writer in self._video_writers.values():
             writer.close()
 
         metadata = asdict(self.metadata)
+        metadata["episode_id"] = final_episode_id
+        extra = metadata.get("extra")
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                metadata.setdefault(key, value)
+        if extra_metadata:
+            metadata.setdefault("extra", {}).update(extra_metadata)
+            metadata.update(extra_metadata)
         if success is not None:
             metadata["success"] = success
         if operator_notes is not None:
@@ -152,20 +171,26 @@ class IntermediateEpisodeWriter:
 
         with (self.tmp_dir / "episode_metadata.json").open("w", encoding="utf-8") as file:
             json.dump(metadata, file, indent=2, sort_keys=True)
+        for rows in (self.rows, self.camera_index_rows, self.event_rows):
+            for row in rows:
+                if row.get("episode_id") == self.metadata.episode_id:
+                    row["episode_id"] = final_episode_id
         pd.DataFrame(self.rows).to_parquet(self.tmp_dir / "timesteps.parquet", index=False)
         pd.DataFrame(self.camera_index_rows).to_parquet(self.tmp_dir / "camera_index.parquet", index=False)
         pd.DataFrame(self.event_rows).to_parquet(self.tmp_dir / "control_events.parquet", index=False)
-        self._write_dataset_metadata()
-        self.tmp_dir.rename(self.final_dir)
+        self._write_dataset_metadata(final_output_dir)
+        final_output_dir.mkdir(parents=True, exist_ok=True)
+        self.tmp_dir.rename(final_dir)
         self._closed = True
-        logger.info("Saved episode %s", self.final_dir)
-        return self.final_dir
+        self.final_dir = final_dir
+        logger.info("Saved episode %s", final_dir)
+        return final_dir
 
-    def _write_dataset_metadata(self) -> None:
-        metadata_path = self.config.output_dir / "dataset_metadata.json"
+    def _write_dataset_metadata(self, output_dir: Path) -> None:
+        metadata_path = output_dir / "dataset_metadata.json"
         if metadata_path.exists():
             return
-        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
         with metadata_path.open("w", encoding="utf-8") as file:
             json.dump(self.config.dataset_metadata, file, indent=2, sort_keys=True)
 

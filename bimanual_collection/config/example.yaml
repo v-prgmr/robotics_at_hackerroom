@@ -8,6 +8,9 @@ left_wrist_camera: /dev/video2
 right_wrist_camera: /dev/video4
 
 robot_fps: 60
+# The v2 training capture persisted adjacent action rows at about 16.57 Hz.
+policy_action_hz: 16.57
+action_bridge_duration_s: 0.1
 camera_fps: 30
 camera_width: 1280
 camera_height: 720

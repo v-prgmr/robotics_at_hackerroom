@@ -37,7 +37,10 @@ bimanual-calibrate = "bimanual_collection.tools.calibrate_arms:main"
 bimanual-export-lerobot = "bimanual_collection.tools.export_lerobot:main"
 bimanual-set-task = "bimanual_collection.tools.set_task:main"
 bimanual-inference = "bimanual_collection.inference:main"
+bimanual-maniflow-inference = "bimanual_collection.maniflow_inference:main"
+bimanual-maniflow-hil = "bimanual_collection.maniflow_hil:main"
 bimanual-compare-trace = "bimanual_collection.tools.compare_trace:main"
+bimanual-trace-rerun = "bimanual_collection.tools.trace_rerun:main"
 bimanual-dataset-rerun = "bimanual_collection.tools.dataset_rerun:main"
 
 [build-system]

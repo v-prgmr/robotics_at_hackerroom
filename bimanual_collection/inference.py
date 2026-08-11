@@ -6,13 +6,14 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import queue
 import signal
 import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -40,6 +41,8 @@ from bimanual_collection.hardware.bimanual_robot import (
     BimanualRobotConfig,
 )
 from bimanual_collection.hardware.cameras import CameraConfigError, MatchedCameraFrame, MultiCameraManager
+from bimanual_collection.recording.episode import TimestepSample, gripper_state
+from bimanual_collection.recording.recorder import EpisodeRecorder, RecorderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,11 @@ class ChunkExecutionMode:
 
 
 CHUNK_EXECUTION_MODES = (ChunkExecutionMode.RECEDING, ChunkExecutionMode.FULL)
+DEFAULT_POLICY_ACTION_HZ = 16.57
+DEFAULT_ACTION_BRIDGE_DURATION_S = 0.1
+
+ROLLOUT_SUCCESS = "success"
+ROLLOUT_FAILURE = "failure"
 
 
 @dataclass(frozen=True)
@@ -73,15 +81,26 @@ class ObservationSnapshot:
 class TimedAction:
     action: np.ndarray
     source_timestamp_s: float
-    published_timestamp_s: float
-    chunk_id: int
+    published_timestamp_s: float | None
+    chunk_id: int | None
     action_index: int
+    upper_action_index: int | None = None
+    interpolation_alpha: float = 0.0
+    phase: str = "trajectory"
+    trajectory_elapsed_s: float | None = None
+    request_id: int = 0
 
 
 @dataclass(frozen=True)
 class PoppedAction:
     action: TimedAction
     queue_remaining: int
+
+
+@dataclass(frozen=True)
+class ActionRequestToken:
+    generation: int
+    request_id: int
 
 
 @dataclass(frozen=True)
@@ -94,6 +113,7 @@ class RerunTelemetryConfig:
     save_path: Path | None = None
     camera_fps: float = 10.0
     max_queue: int = 512
+    policy_action_hz: float = DEFAULT_POLICY_ACTION_HZ
 
 
 def _json_default(value: Any) -> Any:
@@ -232,6 +252,11 @@ class DebugTraceWriter:
             published_timestamp_s=timed_action.published_timestamp_s,
             chunk_id=timed_action.chunk_id,
             action_index=timed_action.action_index,
+            upper_action_index=timed_action.upper_action_index,
+            interpolation_alpha=timed_action.interpolation_alpha,
+            phase=timed_action.phase,
+            trajectory_elapsed_s=timed_action.trajectory_elapsed_s,
+            request_id=timed_action.request_id,
             queue_remaining=queue_remaining,
             action_age_s=time.monotonic() - timed_action.source_timestamp_s,
             dry_run=dry_run,
@@ -395,6 +420,11 @@ class RerunLiveVisualizer:
                 "source_timestamp_s": timed_action.source_timestamp_s,
                 "chunk_id": timed_action.chunk_id,
                 "action_index": timed_action.action_index,
+                "upper_action_index": timed_action.upper_action_index,
+                "interpolation_alpha": timed_action.interpolation_alpha,
+                "phase": timed_action.phase,
+                "trajectory_elapsed_s": timed_action.trajectory_elapsed_s,
+                "request_id": timed_action.request_id,
                 "queue_remaining": int(queue_remaining),
                 "action_age_s": time.monotonic() - timed_action.source_timestamp_s,
                 "dry_run": bool(dry_run),
@@ -488,7 +518,7 @@ class RerunLiveVisualizer:
         self._log_scalar("diagnostics/policy/chunk_length", len(actions))
         if actions.ndim != 2:
             return
-        steps = np.arange(actions.shape[0], dtype=np.float32)
+        steps = np.arange(actions.shape[0], dtype=np.float32) / self.config.policy_action_hz
         for side, offset in (("left", 0), ("right", len(self.joint_names))):
             for joint_index, joint_name in enumerate(self.joint_names):
                 dim = offset + joint_index
@@ -510,6 +540,14 @@ class RerunLiveVisualizer:
         self._log_scalar("diagnostics/action/queue_remaining", payload["queue_remaining"])
         self._log_scalar("diagnostics/action/chunk_id", payload["chunk_id"])
         self._log_scalar("diagnostics/action/action_index", payload["action_index"])
+        self._log_scalar("diagnostics/action/upper_action_index", payload["upper_action_index"])
+        self._log_scalar("diagnostics/action/interpolation_alpha", payload["interpolation_alpha"])
+        self._log_scalar("diagnostics/action/trajectory_elapsed_s", payload["trajectory_elapsed_s"])
+        self._log_scalar("diagnostics/action/request_id", payload["request_id"])
+        self._log_scalar(
+            "diagnostics/action/phase",
+            {"request_hold": 0, "bridge": 1, "trajectory": 2}.get(payload["phase"], -1),
+        )
         self._log_scalar("diagnostics/action/dry_run", int(payload["dry_run"]))
 
     def _log_hold_event(self, payload: dict[str, Any]) -> None:
@@ -552,6 +590,7 @@ class DeploymentHotkeys:
         self._arm_toggle = False
         self._reset = False
         self._home = False
+        self._classification: str | None = None
 
     def request_arm_toggle(self) -> None:
         with self._lock:
@@ -564,6 +603,13 @@ class DeploymentHotkeys:
     def request_home(self) -> None:
         with self._lock:
             self._home = True
+
+    def request_classification(self, classification: str) -> None:
+        if classification not in {ROLLOUT_SUCCESS, ROLLOUT_FAILURE}:
+            raise ValueError(f"Unknown rollout classification: {classification}")
+        with self._lock:
+            if self._classification is None:
+                self._classification = classification
 
     def consume_arm_toggle(self) -> bool:
         with self._lock:
@@ -582,6 +628,12 @@ class DeploymentHotkeys:
             requested = self._home
             self._home = False
         return requested
+
+    def consume_classification(self) -> str | None:
+        with self._lock:
+            classification = self._classification
+            self._classification = None
+        return classification
 
 
 class StateTransitionLogger:
@@ -615,11 +667,13 @@ class LatestObservationBuffer:
     def __init__(self) -> None:
         self._condition = threading.Condition()
         self._latest: ObservationSnapshot | None = None
+        self._history: deque[ObservationSnapshot] = deque(maxlen=8)
         self._sequence = 0
 
     def clear(self) -> None:
         with self._condition:
             self._latest = None
+            self._history.clear()
             self._condition.notify_all()
 
     def publish(
@@ -637,6 +691,7 @@ class LatestObservationBuffer:
                 follower_state=follower_state,
                 camera_matches=camera_matches,
             )
+            self._history.append(self._latest)
             self._condition.notify_all()
             return self._sequence
 
@@ -650,16 +705,50 @@ class LatestObservationBuffer:
                 self._condition.wait(timeout=remaining)
             return self._latest
 
+    def history_ending_at(
+        self,
+        snapshot: ObservationSnapshot,
+        *,
+        steps: int,
+        period_s: float,
+    ) -> list[ObservationSnapshot]:
+        if steps < 1:
+            raise ValueError("steps must be >= 1")
+        with self._condition:
+            candidates = [item for item in self._history if item.sequence <= snapshot.sequence]
+        if not candidates:
+            return [snapshot] * steps
+        targets = [snapshot.timestamp_s - period_s * offset for offset in reversed(range(steps))]
+        return [min(candidates, key=lambda item: abs(item.timestamp_s - target)) for target in targets]
+
 
 class ActionChunkBuffer:
-    """Action queue that preserves chunk execution for a configurable horizon."""
+    """Time-sampled policy trajectory with a fixed hold during inference."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        policy_action_hz: float = DEFAULT_POLICY_ACTION_HZ,
+        bridge_duration_s: float = DEFAULT_ACTION_BRIDGE_DURATION_S,
+    ) -> None:
+        if not np.isfinite(policy_action_hz) or policy_action_hz <= 0:
+            raise ValueError("policy_action_hz must be > 0")
+        if not np.isfinite(bridge_duration_s) or bridge_duration_s < 0:
+            raise ValueError("bridge_duration_s must be >= 0")
         self._lock = threading.Lock()
-        self._actions: deque[TimedAction] = deque()
+        self.policy_action_hz = float(policy_action_hz)
+        self.bridge_duration_s = float(bridge_duration_s)
         self._published_chunks = 0
         self._current_chunk_id = 0
-        self._current_chunk_consumed = 0
+        self._generation = 0
+        self._request_id = 0
+        self._request_pending = False
+        self._hold_action: np.ndarray | None = None
+        self._source_timestamp_s = 0.0
+        self._actions: np.ndarray | None = None
+        self._published_timestamp_s: float | None = None
+        self._trajectory_start_s: float | None = None
+        self._bridge_start_action: np.ndarray | None = None
 
     @property
     def published_chunks(self) -> int:
@@ -668,61 +757,171 @@ class ActionChunkBuffer:
 
     def clear(self) -> None:
         with self._lock:
-            self._actions.clear()
-            self._current_chunk_consumed = 0
+            self._clear_locked(invalidate=True)
 
-    def should_request_chunk(self, execution_horizon: int, replan_threshold: int, chunk_execution_mode: str) -> bool:
+    def _clear_locked(self, *, invalidate: bool) -> None:
+        if invalidate:
+            self._generation += 1
+        self._request_pending = False
+        self._hold_action = None
+        self._actions = None
+        self._published_timestamp_s = None
+        self._trajectory_start_s = None
+        self._bridge_start_action = None
+
+    def should_request_chunk(
+        self,
+        execution_horizon: int,
+        replan_threshold: int,
+        chunk_execution_mode: str,
+        now_s: float | None = None,
+    ) -> bool:
         with self._lock:
+            if self._request_pending or (self._actions is not None and self._trajectory_start_s is None):
+                return False
+            if self._actions is None:
+                return True
+            position = self._trajectory_position_locked(time.monotonic() if now_s is None else now_s)
             if chunk_execution_mode == ChunkExecutionMode.FULL:
-                return not self._actions
-            return (
-                not self._actions
-                or len(self._actions) <= replan_threshold
-                or self._current_chunk_consumed >= execution_horizon
-            )
+                return position + 1e-9 >= len(self._actions)
+            consumed = min(int(np.floor(max(position, 0.0))) + 1, len(self._actions))
+            remaining = len(self._actions) - consumed
+            return remaining <= replan_threshold or consumed >= execution_horizon
 
     def queue_length(self) -> int:
         with self._lock:
-            return len(self._actions)
+            if self._actions is None:
+                return 0
+            if self._trajectory_start_s is None:
+                return len(self._actions)
+            consumed = min(
+                int(np.floor(max(self._trajectory_position_locked(time.monotonic()), 0.0))) + 1,
+                len(self._actions),
+            )
+            return len(self._actions) - consumed
 
-    def publish_chunk(self, actions: np.ndarray, source_timestamp_s: float) -> int:
-        if actions.ndim != 2:
-            raise ValueError(f"Expected action chunk shape (T, D), got {actions.shape}")
-        now_s = time.monotonic()
+    def begin_request(self, *, source_timestamp_s: float, hold_action: np.ndarray) -> ActionRequestToken | None:
+        hold = np.asarray(hold_action, dtype=np.float32)
+        if hold.ndim != 1 or not np.all(np.isfinite(hold)):
+            raise ValueError(f"Expected finite hold action shape (D,), got {hold.shape}")
         with self._lock:
+            if self._request_pending:
+                return None
+            self._request_id += 1
+            self._request_pending = True
+            self._hold_action = hold.copy()
+            self._source_timestamp_s = float(source_timestamp_s)
+            self._actions = None
+            self._published_timestamp_s = None
+            self._trajectory_start_s = None
+            self._bridge_start_action = None
+            return ActionRequestToken(self._generation, self._request_id)
+
+    def cancel_request(self, token: ActionRequestToken) -> None:
+        with self._lock:
+            if token == ActionRequestToken(self._generation, self._request_id):
+                self._clear_locked(invalidate=True)
+
+    def publish_chunk(self, token: ActionRequestToken, actions: np.ndarray) -> int | None:
+        chunk = np.asarray(actions, dtype=np.float32)
+        if chunk.ndim != 2 or len(chunk) < 1:
+            raise ValueError(f"Expected nonempty action chunk shape (T, D), got {chunk.shape}")
+        if not np.all(np.isfinite(chunk)):
+            raise ValueError("Action chunk contains non-finite values")
+        with self._lock:
+            if token != ActionRequestToken(self._generation, self._request_id) or not self._request_pending:
+                return None
+            if self._hold_action is None or chunk.shape[1] != len(self._hold_action):
+                expected = None if self._hold_action is None else len(self._hold_action)
+                raise ValueError(f"Expected action dimension {expected}, got {chunk.shape[1]}")
             self._current_chunk_id += 1
             chunk_id = self._current_chunk_id
-            self._actions.clear()
-            self._current_chunk_consumed = 0
-            for action_index, action in enumerate(actions):
-                self._actions.append(
-                    TimedAction(
-                        action=np.asarray(action, dtype=np.float32),
-                        source_timestamp_s=source_timestamp_s,
-                        published_timestamp_s=now_s,
-                        chunk_id=chunk_id,
-                        action_index=action_index,
-                    )
-                )
+            self._request_pending = False
+            self._actions = chunk.copy()
+            self._published_timestamp_s = time.monotonic()
+            self._trajectory_start_s = None
+            self._bridge_start_action = None
             self._published_chunks += 1
             return chunk_id
 
-    def pop_action(self, now_s: float, max_age_s: float | None) -> np.ndarray | None:
-        timed_action = self.pop_timed_action(now_s, max_age_s)
-        return None if timed_action is None else timed_action.action.action
-
-    def pop_timed_action(self, now_s: float, max_age_s: float | None) -> PoppedAction | None:
+    def sample_timed_action(
+        self,
+        now_s: float,
+        measured_action: np.ndarray,
+        max_age_s: float | None,
+    ) -> PoppedAction | None:
+        measured = np.asarray(measured_action, dtype=np.float32)
         with self._lock:
-            if not self._actions:
+            if self._request_pending:
+                assert self._hold_action is not None
+                return PoppedAction(
+                    TimedAction(
+                        action=self._hold_action.copy(),
+                        source_timestamp_s=self._source_timestamp_s,
+                        published_timestamp_s=None,
+                        chunk_id=None,
+                        action_index=0,
+                        phase="request_hold",
+                        request_id=self._request_id,
+                    ),
+                    queue_remaining=0,
+                )
+            if self._actions is None:
                 return None
-            action = self._actions[0]
-            if max_age_s is not None and now_s - action.source_timestamp_s > max_age_s:
-                self._actions.clear()
-                self._current_chunk_consumed = 0
-                return None
-            action = self._actions.popleft()
-            self._current_chunk_consumed += 1
-            return PoppedAction(action=action, queue_remaining=len(self._actions))
+            if measured.shape != (self._actions.shape[1],):
+                raise ValueError(f"Expected measured action shape {(self._actions.shape[1],)}, got {measured.shape}")
+            if self._trajectory_start_s is None:
+                # Reject an old response before it starts. Once accepted, the
+                # trajectory's deliberately slower knot timing may exceed this age.
+                if max_age_s is not None and now_s - self._source_timestamp_s > max_age_s:
+                    self._clear_locked(invalidate=True)
+                    return None
+                self._trajectory_start_s = now_s
+                self._bridge_start_action = measured.copy()
+
+            assert self._trajectory_start_s is not None
+            assert self._bridge_start_action is not None
+            elapsed_s = max(0.0, now_s - self._trajectory_start_s)
+            if self.bridge_duration_s > 0 and elapsed_s < self.bridge_duration_s:
+                alpha = elapsed_s / self.bridge_duration_s
+                target = (1.0 - alpha) * self._bridge_start_action + alpha * self._actions[0]
+                phase = "bridge"
+                action_index = 0
+                upper_action_index = 0
+                trajectory_elapsed_s = 0.0
+                remaining = len(self._actions)
+            else:
+                trajectory_elapsed_s = max(0.0, elapsed_s - self.bridge_duration_s)
+                position = trajectory_elapsed_s * self.policy_action_hz
+                action_index = min(int(np.floor(position)), len(self._actions) - 1)
+                upper_action_index = min(action_index + 1, len(self._actions) - 1)
+                alpha = min(max(position - action_index, 0.0), 1.0)
+                target = (1.0 - alpha) * self._actions[action_index] + alpha * self._actions[upper_action_index]
+                phase = "trajectory"
+                consumed = min(action_index + 1, len(self._actions))
+                remaining = len(self._actions) - consumed
+
+            return PoppedAction(
+                TimedAction(
+                    action=np.asarray(target, dtype=np.float32),
+                    source_timestamp_s=self._source_timestamp_s,
+                    published_timestamp_s=self._published_timestamp_s,
+                    chunk_id=self._current_chunk_id,
+                    action_index=action_index,
+                    upper_action_index=upper_action_index,
+                    interpolation_alpha=float(alpha),
+                    phase=phase,
+                    trajectory_elapsed_s=trajectory_elapsed_s,
+                    request_id=self._request_id,
+                ),
+                queue_remaining=remaining,
+            )
+
+    def _trajectory_position_locked(self, now_s: float) -> float:
+        if self._trajectory_start_s is None:
+            return 0.0
+        elapsed_s = max(0.0, now_s - self._trajectory_start_s - self.bridge_duration_s)
+        return elapsed_s * self.policy_action_hz
 
 
 class PolicyWorker:
@@ -744,6 +943,8 @@ class PolicyWorker:
         replan_threshold: int = 5,
         chunk_execution_mode: str = ChunkExecutionMode.RECEDING,
         wait_timeout_s: float = 0.1,
+        generation_provider: Callable[[], int] | None = None,
+        response_accepted: Callable[[int], bool] | None = None,
     ) -> None:
         self.runtime = runtime
         self.observation_adapter = observation_adapter
@@ -758,6 +959,8 @@ class PolicyWorker:
         self.replan_threshold = replan_threshold
         self.chunk_execution_mode = chunk_execution_mode
         self.wait_timeout_s = wait_timeout_s
+        self.generation_provider = generation_provider
+        self.response_accepted = response_accepted
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._error: str | None = None
@@ -813,10 +1016,33 @@ class PolicyWorker:
             if snapshot is None:
                 continue
             last_sequence = snapshot.sequence
+            request_token = self.action_buffer.begin_request(
+                source_timestamp_s=snapshot.timestamp_s,
+                hold_action=bimanual_joint_vector(
+                    snapshot.follower_state.left,
+                    snapshot.follower_state.right,
+                    self.observation_adapter.joint_names,
+                ),
+            )
+            if request_token is None:
+                continue
+            if self.reset_requested.is_set() or not self.armed.is_set():
+                self.action_buffer.cancel_request(request_token)
+                continue
 
             try:
+                request_generation = self.generation_provider() if self.generation_provider is not None else 0
                 inference_start_s = time.monotonic()
-                observation = self.observation_adapter.build(snapshot)
+                n_obs_steps = max(1, int(getattr(self.runtime, "n_obs_steps", 1)))
+                if hasattr(self.observation_adapter, "build_history"):
+                    snapshots = self.observation_buffer.history_ending_at(
+                        snapshot,
+                        steps=n_obs_steps,
+                        period_s=1.0 / self.action_buffer.policy_action_hz,
+                    )
+                    observation = self.observation_adapter.build_history(snapshots)
+                else:
+                    observation = self.observation_adapter.build(snapshot)
                 normalized_actions = None
                 if self.debug_trace is not None:
                     self.debug_trace.log_policy_observation(
@@ -829,8 +1055,14 @@ class PolicyWorker:
                     actions = self.runtime.predict_action_chunk(observation)
                 inference_duration_s = time.monotonic() - inference_start_s
                 if self.reset_requested.is_set() or not self.armed.is_set():
+                    self.action_buffer.cancel_request(request_token)
                     continue
-                chunk_id = self.action_buffer.publish_chunk(actions, source_timestamp_s=snapshot.timestamp_s)
+                if self.response_accepted is not None and not self.response_accepted(request_generation):
+                    self.action_buffer.cancel_request(request_token)
+                    continue
+                chunk_id = self.action_buffer.publish_chunk(request_token, actions)
+                if chunk_id is None:
+                    continue
                 if self.debug_trace is not None:
                     self.debug_trace.log_policy_chunk(
                         snapshot,
@@ -847,6 +1079,7 @@ class PolicyWorker:
                         inference_duration_s=inference_duration_s,
                     )
             except Exception as exc:
+                self.action_buffer.cancel_request(request_token)
                 logger.exception("Policy inference failed")
                 self._set_error(str(exc))
                 self.stop_requested.set()
@@ -1031,6 +1264,8 @@ def install_keyboard_controls(
     reset_key: str,
     home_key: str,
     emergency_stop_key: str,
+    failure_key: str | None = None,
+    success_key: str | None = None,
 ) -> Any | None:
     """Start a pynput listener for deployment controls."""
 
@@ -1045,7 +1280,8 @@ def install_keyboard_controls(
 
     def normalize(key: Any) -> str:
         try:
-            return str(key.char)
+            name = str(key.char)
+            return "space" if name == " " else name
         except AttributeError:
             return str(key).replace("Key.", "")
 
@@ -1062,6 +1298,10 @@ def install_keyboard_controls(
             hotkeys.request_reset()
         elif name == home_key:
             hotkeys.request_home()
+        elif failure_key is not None and name == failure_key:
+            hotkeys.request_classification(ROLLOUT_FAILURE)
+        elif success_key is not None and name == success_key:
+            hotkeys.request_classification(ROLLOUT_SUCCESS)
 
     def on_release(key: Any) -> None:
         pressed.discard(normalize(key))
@@ -1080,6 +1320,81 @@ def precise_sleep_until(deadline_s: float) -> None:
     remaining = deadline_s - time.monotonic()
     if remaining > 0:
         time.sleep(remaining)
+
+
+@dataclass
+class PeriodicCaptureGate:
+    """Select controller ticks at a lower dataset cadence without catch-up bursts."""
+
+    capture_hz: float
+    _next_capture_timestamp_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.capture_hz) or self.capture_hz <= 0:
+            raise ValueError("capture_hz must be > 0")
+
+    def reset(self) -> None:
+        self._next_capture_timestamp_s = None
+
+    def should_capture(self, timestamp_s: float) -> bool:
+        period_s = 1.0 / self.capture_hz
+        if self._next_capture_timestamp_s is None:
+            self._next_capture_timestamp_s = timestamp_s + period_s
+            return True
+        if timestamp_s < self._next_capture_timestamp_s:
+            return False
+        elapsed_periods = int((timestamp_s - self._next_capture_timestamp_s) // period_s) + 1
+        self._next_capture_timestamp_s += elapsed_periods * period_s
+        return True
+
+
+@dataclass
+class AutonomousRolloutCapture:
+    """Stages an autonomous rollout and publishes it only after operator classification."""
+
+    recorder: EpisodeRecorder
+    success_output_dir: Path
+    failure_output_dir: Path
+    policy_checkpoint: str | None
+    capture_hz: float = DEFAULT_POLICY_ACTION_HZ
+    _capture_gate: PeriodicCaptureGate = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._capture_gate = PeriodicCaptureGate(self.capture_hz)
+
+    def start(self) -> None:
+        self._capture_gate.reset()
+        self.recorder.start_deferred(
+            extra={
+                "episode_type": "autonomous_rollout",
+                "policy_checkpoint": self.policy_checkpoint,
+                "capture_hz": self.capture_hz,
+            }
+        )
+
+    def should_record(self, timestamp_s: float) -> bool:
+        return self._capture_gate.should_capture(timestamp_s)
+
+    def classify(self, classification: str) -> Path:
+        success = classification == ROLLOUT_SUCCESS
+        terminal_timestamp = datetime.now(timezone.utc).isoformat()
+        path = self.recorder.stop_and_save_to(
+            self.success_output_dir if success else self.failure_output_dir,
+            success=success,
+            extra_metadata={
+                "terminal_success": success,
+                "termination_reason": f"operator_{classification}",
+                "policy_checkpoint": self.policy_checkpoint,
+                "terminal_timestamp": terminal_timestamp,
+                "episode_type": "autonomous_rollout",
+            },
+        )
+        self._capture_gate.reset()
+        return path
+
+    def discard(self) -> None:
+        self.recorder.discard()
+        self._capture_gate.reset()
 
 
 def move_followers_home_now(robot: BimanualRobot, config: dict[str, Any], args: argparse.Namespace) -> None:
@@ -1111,6 +1426,7 @@ def run_control_loop(
     flag: StopFlag,
     debug_trace: DebugTraceWriter | None = None,
     live_visualizer: RerunLiveVisualizer | None = None,
+    rollout_capture: AutonomousRolloutCapture | None = None,
 ) -> None:
     period_s = 1.0 / robot_fps
     states = StateTransitionLogger(debug_trace, live_visualizer)
@@ -1118,12 +1434,116 @@ def run_control_loop(
     had_running_actions = False
     previous_loop_start = time.monotonic()
 
+    def discard_active_capture() -> None:
+        if rollout_capture is not None and rollout_capture.recorder.is_recording:
+            rollout_capture.discard()
+
+    def record_tick_and_maybe_classify(
+        *,
+        follower_state: BimanualFollowerState,
+        camera_matches: dict[str, MatchedCameraFrame],
+        left_action: dict[str, float],
+        right_action: dict[str, float],
+        action_source: str,
+        loop_start: float,
+        sample_timestamp: float,
+        timed_action: TimedAction | None = None,
+        queue_remaining: int | None = None,
+        hold_reason: str | None = None,
+    ) -> bool:
+        nonlocal previous_loop_start, had_running_actions
+        interval_s = loop_start - previous_loop_start
+        measured_hz = 1.0 / interval_s if interval_s > 0 else 0.0
+        loop_duration_s = time.monotonic() - loop_start
+        classification = hotkeys.consume_classification()
+        capture_current_tick = (
+            rollout_capture is not None
+            and rollout_capture.recorder.is_recording
+            and (classification is not None or rollout_capture.should_record(sample_timestamp))
+        )
+        if capture_current_tick:
+            assert rollout_capture is not None
+            episode_id = rollout_capture.recorder.episode_id
+            assert episode_id is not None
+            rollout_capture.recorder.add_sample(
+                TimestepSample(
+                    episode_id=episode_id,
+                    timestep_index=rollout_capture.recorder.sample_count,
+                    monotonic_timestamp_s=sample_timestamp,
+                    wall_timestamp_s=time.time(),
+                    left_leader_joints={},
+                    right_leader_joints={},
+                    left_follower_joints=dict(follower_state.left),
+                    right_follower_joints=dict(follower_state.right),
+                    left_gripper_state=gripper_state(follower_state.left),
+                    right_gripper_state=gripper_state(follower_state.right),
+                    left_commanded_action=dict(left_action),
+                    right_commanded_action=dict(right_action),
+                    camera_matches=camera_matches,
+                    measured_control_hz=measured_hz,
+                    loop_duration_s=loop_duration_s,
+                    metadata={
+                        "action_source": action_source,
+                        "chunk_id": timed_action.chunk_id if timed_action is not None else None,
+                        "action_index": timed_action.action_index if timed_action is not None else None,
+                        "upper_action_index": timed_action.upper_action_index if timed_action is not None else None,
+                        "interpolation_alpha": timed_action.interpolation_alpha if timed_action is not None else None,
+                        "action_phase": timed_action.phase if timed_action is not None else None,
+                        "trajectory_elapsed_s": timed_action.trajectory_elapsed_s if timed_action is not None else None,
+                        "request_id": timed_action.request_id if timed_action is not None else None,
+                        "queue_remaining": queue_remaining,
+                        "hold_reason": hold_reason,
+                        "dry_run": dry_run,
+                    },
+                )
+            )
+
+        if classification is None:
+            previous_loop_start = loop_start
+            return False
+        if rollout_capture is None or not rollout_capture.recorder.is_recording:
+            previous_loop_start = loop_start
+            return False
+
+        try:
+            path = rollout_capture.classify(classification)
+            print(f"Saved {classification} rollout: {path}")
+            state_reason = f"{classification} rollout saved; policy disarmed"
+        except Exception as exc:
+            flag.request(f"failed to save {classification} rollout: {exc}")
+            logger.exception("Failed to save classified rollout")
+            discard_active_capture()
+            state_reason = f"{classification} rollout save failed; policy disarmed"
+        armed.clear()
+        action_buffer.clear()
+        observation_buffer.clear()
+        reset_requested.set()
+        had_running_actions = False
+        states.set(DeploymentState.IDLE, state_reason)
+        previous_loop_start = loop_start
+        return True
+
+    def hold_command(follower_state: BimanualFollowerState) -> tuple[dict[str, float], dict[str, float]]:
+        left = {
+            k: v for k, v in follower_state.left.items() if k in DEFAULT_JOINT_NAMES or k.endswith(".pos")
+        }
+        right = {
+            k: v for k, v in follower_state.right.items() if k in DEFAULT_JOINT_NAMES or k.endswith(".pos")
+        }
+        if dry_run:
+            return robot.clip_action(left, side="left"), robot.clip_action(right, side="right")
+        result = robot.hold_position()
+        if result is None:
+            raise RuntimeError("Cannot hold before a follower state has been read")
+        return result.left, result.right
+
     while not flag.stop and not policy_stop_requested.is_set():
         loop_start = time.monotonic()
 
         if hotkeys.consume_arm_toggle():
             if armed.is_set():
                 armed.clear()
+                discard_active_capture()
                 action_buffer.clear()
                 observation_buffer.clear()
                 reset_requested.set()
@@ -1133,11 +1553,19 @@ def run_control_loop(
                 action_buffer.clear()
                 observation_buffer.clear()
                 reset_requested.set()
+                if rollout_capture is not None:
+                    try:
+                        rollout_capture.start()
+                    except Exception as exc:
+                        flag.request(f"failed to start rollout capture: {exc}")
+                        logger.exception("Failed to start rollout capture")
+                        break
                 armed.set()
                 had_running_actions = False
                 states.set(DeploymentState.ARMED_WAITING_FOR_CHUNK, "policy armed")
 
         if hotkeys.consume_reset():
+            discard_active_capture()
             action_buffer.clear()
             observation_buffer.clear()
             reset_requested.set()
@@ -1149,6 +1577,7 @@ def run_control_loop(
 
         if hotkeys.consume_home():
             armed.clear()
+            discard_active_capture()
             action_buffer.clear()
             observation_buffer.clear()
             reset_requested.set()
@@ -1181,6 +1610,7 @@ def run_control_loop(
             break
 
         if not armed.is_set():
+            hotkeys.consume_classification()
             if not dry_run:
                 with contextlib.suppress(Exception):
                     robot.hold_position()
@@ -1188,7 +1618,8 @@ def run_control_loop(
             previous_loop_start = loop_start
             continue
 
-        if camera_matches_valid(camera_sample.matches, image_feature_keys):
+        camera_valid = camera_matches_valid(camera_sample.matches, image_feature_keys)
+        if camera_valid:
             sequence = observation_buffer.publish(
                 timestamp_s=sample_timestamp,
                 follower_state=follower_state,
@@ -1206,14 +1637,26 @@ def run_control_loop(
                     joint_names=DEFAULT_JOINT_NAMES,
                 )
         else:
+            observation_buffer.clear()
             action_buffer.clear()
+            reset_requested.set()
             if debug_trace is not None:
                 debug_trace.log_hold(reason="invalid camera frame", armed=True)
             if live_visualizer is not None:
                 live_visualizer.log_hold(reason="invalid camera frame", armed=True)
 
-        popped_action = action_buffer.pop_timed_action(time.monotonic(), max_action_age_s)
+        measured_action = bimanual_joint_vector(
+            follower_state.left,
+            follower_state.right,
+            DEFAULT_JOINT_NAMES,
+        )
+        popped_action = action_buffer.sample_timed_action(
+            time.monotonic(),
+            measured_action,
+            max_action_age_s,
+        )
         if popped_action is None:
+            hold_reason = "missing or stale policy action" if camera_valid else "invalid camera frame"
             state = (
                 DeploymentState.HOLDING_STALE_POLICY
                 if had_running_actions
@@ -1221,14 +1664,27 @@ def run_control_loop(
             )
             states.set(state, "holding current follower pose")
             if debug_trace is not None:
-                debug_trace.log_hold(reason="missing or stale policy action", armed=True)
+                debug_trace.log_hold(reason=hold_reason, armed=True)
             if live_visualizer is not None:
-                live_visualizer.log_hold(reason="missing or stale policy action", armed=True)
-            if not dry_run:
-                with contextlib.suppress(Exception):
-                    robot.hold_position()
+                live_visualizer.log_hold(reason=hold_reason, armed=True)
+            try:
+                left_action, right_action = hold_command(follower_state)
+            except Exception as exc:
+                flag.request(f"hold command failed: {exc}")
+                logger.exception("Failed to command follower hold")
+                break
+            if record_tick_and_maybe_classify(
+                follower_state=follower_state,
+                camera_matches=camera_sample.matches,
+                left_action=left_action,
+                right_action=right_action,
+                action_source="hold",
+                hold_reason=hold_reason,
+                loop_start=loop_start,
+                sample_timestamp=sample_timestamp,
+            ):
+                continue
             precise_sleep_until(loop_start + period_s)
-            previous_loop_start = loop_start
             continue
 
         try:
@@ -1236,8 +1692,13 @@ def run_control_loop(
             action = timed_action.action
             left_action, right_action = split_bimanual_action(action)
             validate_action_delta(left_action, right_action, follower_state, max_action_delta)
-            if not dry_run:
-                robot.send_actions(left_action, right_action)
+            if dry_run:
+                left_action = robot.clip_action(left_action, side="left")
+                right_action = robot.clip_action(right_action, side="right")
+            else:
+                command_result = robot.send_actions(left_action, right_action)
+                left_action = command_result.left
+                right_action = command_result.right
             if debug_trace is not None:
                 debug_trace.log_robot_action(
                     action=action,
@@ -1261,11 +1722,29 @@ def run_control_loop(
             logger.exception("Unsafe policy action; stopping inference")
             break
 
-        had_running_actions = True
+        if timed_action.phase != "request_hold":
+            had_running_actions = True
         interval_s = loop_start - previous_loop_start
-        previous_loop_start = loop_start
         measured_hz = 1.0 / interval_s if interval_s > 0 else 0.0
-        states.set(DeploymentState.RUNNING, f"policy commands active at {measured_hz:.1f} Hz")
+        if record_tick_and_maybe_classify(
+            follower_state=follower_state,
+            camera_matches=camera_sample.matches,
+            left_action=left_action,
+            right_action=right_action,
+            action_source="request_hold" if timed_action.phase == "request_hold" else "policy",
+            timed_action=timed_action,
+            queue_remaining=popped_action.queue_remaining,
+            loop_start=loop_start,
+            sample_timestamp=sample_timestamp,
+        ):
+            continue
+        if timed_action.phase == "request_hold":
+            states.set(DeploymentState.ARMED_WAITING_FOR_CHUNK, "holding fixed request pose during inference")
+        else:
+            states.set(
+                DeploymentState.RUNNING,
+                f"robot commands {measured_hz:.1f} Hz; policy knots {action_buffer.policy_action_hz:.2f} Hz",
+            )
         precise_sleep_until(loop_start + period_s)
 
     worker_error = policy_worker.error
@@ -1274,15 +1753,21 @@ def run_control_loop(
     states.set(DeploymentState.ESTOP, flag.reason or "policy worker stopped")
     armed.clear()
     action_buffer.clear()
+    discard_active_capture()
     if not dry_run and robot.is_connected:
         with contextlib.suppress(Exception):
             robot.hold_position()
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
+def build_arg_parser(*, checkpoint_required: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, help="YAML configuration file")
-    parser.add_argument("--checkpoint", type=Path, required=True, help="Path to pretrained_model checkpoint directory")
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        required=checkpoint_required,
+        help="Path to pretrained_model checkpoint directory",
+    )
     parser.add_argument("--task-description")
     parser.add_argument("--device", help="Torch device override, e.g. cuda, cuda:0, or cpu")
     parser.add_argument("--left-robot-port")
@@ -1291,6 +1776,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--left-wrist-camera")
     parser.add_argument("--right-wrist-camera")
     parser.add_argument("--robot-fps", type=int)
+    parser.add_argument(
+        "--policy-action-hz",
+        type=float,
+        help=f"Temporal rate of policy trajectory knots; defaults to {DEFAULT_POLICY_ACTION_HZ} Hz.",
+    )
+    parser.add_argument(
+        "--action-bridge-duration-s",
+        type=float,
+        help=(
+            "Time to interpolate from the response-time measured pose to action 0; "
+            f"defaults to {DEFAULT_ACTION_BRIDGE_DURATION_S} s, use 0 to disable."
+        ),
+    )
     parser.add_argument("--camera-fps", type=int)
     parser.add_argument("--camera-width", type=int)
     parser.add_argument("--camera-height", type=int)
@@ -1307,7 +1805,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable-action-age-check",
         action="store_true",
-        help="Do not discard queued policy actions by age; reset, disarm, invalid cameras, and estop still clear or stop actions.",
+        help="Do not reject a policy response when its source observation is too old to begin playback.",
     )
     parser.add_argument("--max-action-delta", type=float, help="Reject commands farther than this from current joint state")
     parser.add_argument("--policy-wait-timeout-s", type=float, default=0.1)
@@ -1326,7 +1824,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--chunk-execution-mode",
         choices=CHUNK_EXECUTION_MODES,
-        default=ChunkExecutionMode.RECEDING,
+        default=ChunkExecutionMode.FULL,
         help="Use 'receding' to replace chunks while executing, or 'full' to request the next chunk only after the current queue is empty.",
     )
     parser.add_argument("--debug-trace-dir", type=Path, help="Write inference debug trace under this directory")
@@ -1370,8 +1868,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = build_arg_parser()
+def run_inference(
+    argv: list[str] | None = None,
+    *,
+    checkpoint_required: bool = True,
+    configure_parser: Callable[[argparse.ArgumentParser], None] | None = None,
+    runtime_adapter_builder: Callable[[argparse.Namespace, str], tuple[Any, Any]] | None = None,
+    policy_label: str = "LeRobot",
+) -> None:
+    parser = build_arg_parser(checkpoint_required=checkpoint_required)
+    if configure_parser is not None:
+        configure_parser(parser)
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
     config = load_config(args.config)
@@ -1383,14 +1890,37 @@ def main(argv: list[str] | None = None) -> None:
     task_description = cfg_value(args, config, "task_description")
     if not task_description:
         parser.error("--task-description or task_description in config is required")
+    policy_action_hz = float(cfg_value(args, config, "policy_action_hz", DEFAULT_POLICY_ACTION_HZ))
+    action_bridge_duration_s = float(
+        cfg_value(args, config, "action_bridge_duration_s", DEFAULT_ACTION_BRIDGE_DURATION_S)
+    )
     if args.arm_key == args.emergency_stop_key:
         parser.error("arm_key must not match emergency_stop_key")
     if args.reset_key in {args.arm_key, args.emergency_stop_key}:
         parser.error("reset_key must not match arm_key or emergency_stop_key")
     if args.home_key in {args.arm_key, args.reset_key, args.emergency_stop_key}:
         parser.error("home_key must not match arm_key, reset_key, or emergency_stop_key")
+    capture_dataset = bool(getattr(args, "capture_dataset", False))
+    failure_output_dir = getattr(args, "failure_output_dir", None)
+    success_output_dir = getattr(args, "success_output_dir", None)
+    failure_key = getattr(args, "failure_key", None)
+    success_key = getattr(args, "success_key", None)
+    if capture_dataset and (failure_output_dir is None or success_output_dir is None):
+        parser.error("--capture-dataset requires --failure-output-dir and --success-output-dir")
+    if not capture_dataset and (failure_output_dir is not None or success_output_dir is not None):
+        parser.error("--failure-output-dir and --success-output-dir require --capture-dataset")
+    if capture_dataset:
+        deployment_keys = {args.arm_key, args.reset_key, args.home_key, args.emergency_stop_key}
+        if failure_key == success_key:
+            parser.error("failure_key must not match success_key")
+        if failure_key in deployment_keys or success_key in deployment_keys:
+            parser.error("failure_key and success_key must not match deployment control keys")
     if args.robot_fps is not None and args.robot_fps <= 0:
         parser.error("robot_fps must be > 0")
+    if not np.isfinite(policy_action_hz) or policy_action_hz <= 0:
+        parser.error("policy_action_hz must be > 0")
+    if not np.isfinite(action_bridge_duration_s) or action_bridge_duration_s < 0:
+        parser.error("action_bridge_duration_s must be >= 0")
     if not args.disable_action_age_check and args.max_action_age_s <= 0:
         parser.error("max_action_age_s must be > 0")
     if args.execution_horizon < 1:
@@ -1423,18 +1953,61 @@ def main(argv: list[str] | None = None) -> None:
         joint_limits=parse_joint_limits(config.get("joint_limits")),
     )
 
-    runtime = PolicyRuntime(args.checkpoint.expanduser(), device=args.device)
-    runtime.load()
-    adapter = ObservationAdapter(task_description=str(task_description), image_feature_keys=runtime.image_feature_keys)
+    if runtime_adapter_builder is None:
+        if args.checkpoint is None:
+            parser.error("--checkpoint is required")
+        runtime = PolicyRuntime(args.checkpoint.expanduser(), device=args.device)
+        runtime.load()
+        adapter = ObservationAdapter(task_description=str(task_description), image_feature_keys=runtime.image_feature_keys)
+    else:
+        runtime, adapter = runtime_adapter_builder(args, str(task_description))
+        runtime.load()
     max_action_age_s = None if args.disable_action_age_check else float(args.max_action_age_s)
+    rollout_capture = None
+    if capture_dataset:
+        assert failure_output_dir is not None and success_output_dir is not None
+        failure_output_dir = failure_output_dir.expanduser()
+        success_output_dir = success_output_dir.expanduser()
+        staging_dir = success_output_dir.parent / ".maniflow-rollout-staging"
+        for path in (failure_output_dir, success_output_dir, staging_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        devices = {os.stat(path).st_dev for path in (failure_output_dir, success_output_dir, staging_dir)}
+        if len(devices) != 1:
+            parser.error("success, failure, and rollout staging directories must be on the same filesystem")
+        checkpoint = getattr(runtime, "server_metadata", {}).get("checkpoint")
+        camera_fps = int(cfg_value(args, config, "camera_fps", 30))
+        rollout_capture = AutonomousRolloutCapture(
+            recorder=EpisodeRecorder(
+                RecorderConfig(
+                    output_dir=staging_dir,
+                    task_description=str(task_description),
+                    camera_fps=camera_fps,
+                    dataset_metadata={
+                        "episode_type": "autonomous_rollout",
+                        "policy_checkpoint": checkpoint,
+                        "robot_fps": robot_fps,
+                        "policy_action_hz": policy_action_hz,
+                        "capture_hz": policy_action_hz,
+                        "action_bridge_duration_s": action_bridge_duration_s,
+                    },
+                )
+            ),
+            success_output_dir=success_output_dir,
+            failure_output_dir=failure_output_dir,
+            policy_checkpoint=checkpoint,
+            capture_hz=policy_action_hz,
+        )
     debug_trace = None
     if args.debug_trace_dir is not None:
         debug_trace = DebugTraceWriter(
             args.debug_trace_dir,
             metadata={
-                "checkpoint": str(args.checkpoint),
+                "policy_runtime": policy_label,
+                "checkpoint": str(args.checkpoint) if args.checkpoint is not None else None,
                 "task_description": str(task_description),
                 "robot_fps": robot_fps,
+                "policy_action_hz": policy_action_hz,
+                "action_bridge_duration_s": action_bridge_duration_s,
                 "image_feature_keys": runtime.image_feature_keys,
                 "joint_names": list(DEFAULT_JOINT_NAMES),
                 "max_action_age_s": max_action_age_s,
@@ -1458,6 +2031,7 @@ def main(argv: list[str] | None = None) -> None:
                 save_path=args.rerun_save.expanduser() if args.rerun_save is not None else None,
                 camera_fps=float(args.rerun_camera_fps),
                 max_queue=int(args.rerun_max_queue),
+                policy_action_hz=policy_action_hz,
             ),
             joint_names=DEFAULT_JOINT_NAMES,
         )
@@ -1465,7 +2039,10 @@ def main(argv: list[str] | None = None) -> None:
 
     robot = BimanualRobot.from_lerobot(robot_cfg)
     observation_buffer = LatestObservationBuffer()
-    action_buffer = ActionChunkBuffer()
+    action_buffer = ActionChunkBuffer(
+        policy_action_hz=policy_action_hz,
+        bridge_duration_s=action_bridge_duration_s,
+    )
     armed = threading.Event()
     reset_requested = threading.Event()
     policy_stop_requested = threading.Event()
@@ -1494,15 +2071,26 @@ def main(argv: list[str] | None = None) -> None:
         reset_key=args.reset_key,
         home_key=args.home_key,
         emergency_stop_key=args.emergency_stop_key,
+        failure_key=failure_key if capture_dataset else None,
+        success_key=success_key if capture_dataset else None,
     )
 
-    print(f"Checkpoint: {args.checkpoint}")
+    print(f"Policy runtime: {policy_label}")
+    if args.checkpoint is not None:
+        print(f"Checkpoint: {args.checkpoint}")
     print(f"Task: {task_description}")
     print(f"Chunk execution mode: {args.chunk_execution_mode}")
+    print(f"Policy trajectory: {policy_action_hz:.2f} Hz knots, {robot_fps} Hz robot loop")
+    print(f"Action 0 bridge: {action_bridge_duration_s:.3f} s")
     print(
         f"Controls: '{args.arm_key}' arm/disarm, '{args.reset_key}' reset policy, "
         f"'{args.home_key}' disarm+home, '{args.emergency_stop_key}' emergency stop"
     )
+    if rollout_capture is not None:
+        print(
+            f"Rollout capture: '{failure_key}' failure -> {failure_output_dir}, "
+            f"'{success_key}' success -> {success_output_dir}"
+        )
     if args.dry_run:
         print("Dry run: policy commands will not be sent to the robot")
     if debug_trace is not None:
@@ -1542,6 +2130,7 @@ def main(argv: list[str] | None = None) -> None:
             flag=flag,
             debug_trace=debug_trace,
             live_visualizer=live_visualizer,
+            rollout_capture=rollout_capture,
         )
     finally:
         logger.info("Shutting down inference: %s", flag.reason or "normal exit")
@@ -1557,6 +2146,12 @@ def main(argv: list[str] | None = None) -> None:
                 logger.warning("Dropped %d Rerun telemetry events", live_visualizer.dropped_events)
         if debug_trace is not None:
             debug_trace.close()
+        if rollout_capture is not None:
+            rollout_capture.discard()
+
+
+def main(argv: list[str] | None = None) -> None:
+    run_inference(argv)
 
 
 if __name__ == "__main__":
