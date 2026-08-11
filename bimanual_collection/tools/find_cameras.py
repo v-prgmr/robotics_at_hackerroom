@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -176,6 +178,29 @@ def write_contact_sheet(candidates: list[CameraCandidate], path: Path) -> None:
     sheet.save(path)
 
 
+def open_contact_sheet_window(path: Path, *, wait: bool = False) -> bool:
+    """Open the contact sheet in the system image viewer and return whether it succeeded."""
+
+    if not path.exists():
+        return False
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            process = subprocess.Popen(["open", str(path)])
+        elif system == "Windows":
+            os.startfile(path)  # type: ignore[attr-defined]
+            process = None
+        else:
+            process = subprocess.Popen(["xdg-open", str(path)])
+        print(f"Opened contact sheet preview window: {path}")
+        if wait and process is not None:
+            process.wait()
+        return True
+    except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+        print(f"Could not open contact sheet preview window: {exc}")
+        return False
+
+
 def display_candidates(candidates: list[CameraCandidate]) -> None:
     if not candidates:
         print("No cameras produced valid frames.")
@@ -196,7 +221,7 @@ def assign_roles(candidates: list[CameraCandidate], roles: list[str]) -> dict[st
     mapping: dict[str, str | int] = {}
     by_index = {candidate.index: candidate for candidate in candidates}
     used_resolved: dict[str | int, str] = {}
-    print("\nOpen the sample PNGs or contact_sheet.jpg to identify each camera view.")
+    print("\nUse the contact sheet preview window to identify each camera view by # index.")
     for role in roles:
         while True:
             answer = input(f"Camera index for {role.replace('_', ' ')}: ").strip()
@@ -238,6 +263,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fourcc", default="MJPG")
     parser.add_argument("--prefer-raw", action="store_true", help="Write /dev/video* paths instead of stable aliases.")
     parser.add_argument("--list", action="store_true", help="Probe cameras, save samples, and exit without assignment.")
+    parser.add_argument("--no-preview", action="store_true", help="Do not open the contact sheet preview window.")
     parser.add_argument(
         "--roles",
         nargs="+",
@@ -249,6 +275,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
+    contact_sheet_path = args.output_dir / "contact_sheet.jpg"
     candidates = probe_cameras(
         output_dir=args.output_dir,
         width=args.camera_width,
@@ -258,6 +285,10 @@ def main(argv: list[str] | None = None) -> None:
         prefer_stable=not args.prefer_raw,
     )
     display_candidates(candidates)
+    if candidates and not args.no_preview:
+        opened = open_contact_sheet_window(contact_sheet_path, wait=bool(args.list))
+        if not opened:
+            print(f"Contact sheet saved at {contact_sheet_path}")
     if args.list:
         return
     mapping = assign_roles(candidates, args.roles)
