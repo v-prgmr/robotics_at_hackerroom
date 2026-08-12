@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import copy
+import dill
 import os
 import pathlib
 import sys
+import types
 from collections import defaultdict
+
+decord_stub = types.ModuleType("decord")
+setattr(decord_stub, "VideoReader", type("_UnavailableVideoReader", (), {}))
+setattr(decord_stub, "cpu", lambda *args, **kwargs: None)
+setattr(decord_stub, "bridge", type("_Bridge", (), {"set_bridge": staticmethod(lambda *args, **kwargs: None)})())
+sys.modules.setdefault("decord", decord_stub)
 
 import hydra
 import numpy as np
@@ -126,6 +134,37 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
         self.optimizer_step = 0
         self.epoch = 0
 
+        resume_checkpoint = cfg.training.resume_from_checkpoint
+        if resume_checkpoint:
+            self._load_progress_checkpoint(resume_checkpoint)
+
+    def _load_progress_checkpoint(self, path):
+        checkpoint_path = pathlib.Path(path).expanduser()
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Progress resume checkpoint does not exist: {checkpoint_path}")
+        payload = torch.load(checkpoint_path.open("rb"), pickle_module=dill, map_location="cpu")
+        state_dicts = payload.get("state_dicts", {})
+        required = {"model", "optimizer"}
+        if self.ema_model is not None:
+            required.update({"ema_model", "ema"})
+        missing = required - set(state_dicts)
+        if missing:
+            raise KeyError(f"Progress checkpoint is missing state dicts: {sorted(missing)}")
+        self.model.load_state_dict(state_dicts["model"], strict=True)
+        self.optimizer.load_state_dict(state_dicts["optimizer"])
+        if self.ema_model is not None:
+            self.ema_model.load_state_dict(state_dicts["ema_model"], strict=True)
+            self.ema.load_state_dict(state_dicts["ema"])
+        pickles = payload.get("pickles", {})
+        for key in self.include_keys:
+            if key not in pickles:
+                raise KeyError(f"Progress checkpoint is missing counter: {key}")
+            setattr(self, key, dill.loads(pickles[key]))
+        print(
+            f"Resumed progress training from {checkpoint_path}: "
+            f"epoch={self.epoch}, optimizer_step={self.optimizer_step}, global_step={self.global_step}"
+        )
+
     def run(self):
         cfg = copy.deepcopy(self.cfg)
         device = torch.device(cfg.training.device)
@@ -158,6 +197,9 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
         gradient_accumulate_every = int(cfg.training.gradient_accumulate_every)
         if gradient_accumulate_every <= 0:
             raise ValueError("training.gradient_accumulate_every must be positive")
+        for name in ("val_every", "checkpoint_every"):
+            if int(getattr(cfg.training, name)) <= 0:
+                raise ValueError(f"training.{name} must be positive")
 
         def training_complete():
             if num_grad_steps is not None:
@@ -176,6 +218,7 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
             unit="step",
             dynamic_ncols=True,
         )
+        run_failed = True
         try:
             while not training_complete():
                 self.model.train()
@@ -195,6 +238,7 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
                         accumulation_loss_sum += step_loss_sum
                         if accumulation_microbatches == gradient_accumulate_every:
                             accumulated_mse = accumulation_loss_sum / accumulation_valid_count
+                            step_valid_count = accumulation_valid_count
                             _divide_gradients(self.head_parameters, accumulation_valid_count)
                             self.optimizer.step()
                             self.optimizer.zero_grad(set_to_none=True)
@@ -214,12 +258,11 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
                             run.log(
                                 {
                                     "train_progress_mse_step": accumulated_mse,
-                                    "train_progress_valid_count_step": train_valid_count + valid_count,
+                                    "train_progress_valid_count_step": step_valid_count,
                                     "optimizer_step": self.optimizer_step,
                                     "global_step": self.global_step + 1,
                                     "epoch": self.epoch,
                                 },
-                                step=self.optimizer_step,
                             )
                     train_loss_sum += step_loss_sum
                     train_valid_count += valid_count
@@ -274,9 +317,11 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
                     self.epoch % cfg.training.checkpoint_every == 0 or final_step
                 ):
                     self.save_checkpoint(use_thread=False)
-                run.log(log, step=self.optimizer_step)
+                run.log(log)
+            run_failed = False
         finally:
             progress.close()
+            run.finish(exit_code=1 if run_failed else 0)
 
 
 _CONFIG_ROOT = pathlib.Path(__file__).parent.parent

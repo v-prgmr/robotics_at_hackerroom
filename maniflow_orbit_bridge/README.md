@@ -962,6 +962,12 @@ advance it. When set, it overrides `NUM_EPOCHS` as the stopping criterion and th
 still runs validation and saves the last checkpoint. If `NUM_GRAD_STEPS` is unset, training retains
 the epoch-based `NUM_EPOCHS` behavior.
 
+Resume an interrupted progress run with `RESUME_CHECKPOINT=/path/to/latest.ckpt`. On resume,
+`NUM_GRAD_STEPS` is an absolute optimizer-step target, so a checkpoint at step 3200 with
+`NUM_GRAD_STEPS=5000` performs 1800 additional updates. Resume checkpoints restore the progress head,
+optimizer, EMA model/helper, and epoch/global/optimizer counters. They are only written at completed
+gradient-accumulation boundaries.
+
 `BATCH_SIZE` is the training microbatch size and `GRADIENT_ACCUMULATE_EVERY` controls how many valid
 microbatches form one optimizer update. For example, `BATCH_SIZE=64` and
 `GRADIENT_ACCUMULATE_EVERY=2` give an effective training batch of 128, while
@@ -993,6 +999,11 @@ Checkpoint paths may contain Hydra-special characters such as `=`. The launcher 
 and preserves the pathname of symbolic links, so a safe symlink such as
 `/workspace/checkpoints/maniflow_epoch100.ckpt` can point to an original checkpoint named
 `epoch=0100-val_loss=0.060680.ckpt` without copying the file.
+
+The progress split holds out complete episodes for fitting and evaluating the new head. If the source
+ManiFlow checkpoint was previously trained on those same demonstrations, this is a head-level frozen
+representation probe rather than a fully representation-unseen evaluation. A strict end-to-end holdout
+requires excluding the same validation episodes when training the source ManiFlow policy.
 
 Only `progress_head.*` is optimized. The observation encoder, ViT/CLIP modules, DiT-X action model,
 and T5 encoder remain frozen and in evaluation mode. Validation uses complete held-out supervised

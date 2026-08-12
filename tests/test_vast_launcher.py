@@ -68,6 +68,11 @@ def test_progress_launcher_maps_exact_gradient_steps_to_hydra():
     assert '"source_checkpoint=\'${SOURCE_CHECKPOINT}\'"' in shared
     assert 'export PYTHONPATH="${MANIFLOW_DIR}${PYTHONPATH:+:${PYTHONPATH}}"' in shared
     assert '"logging.name=\'${RUN_NAME}\'"' in shared
+    assert 'RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"' in shared
+    assert 'HYDRA_OVERRIDES+=("training.resume_from_checkpoint=\'${RESUME_CHECKPOINT}\'")' in shared
+    assert 'HYDRA_OVERRIDES+=("dataloader.persistent_workers=false")' in shared
+    assert "from maniflow.dataset.orbit_image_dataset import OrbitImageDataset" in shared
+    assert 'Valid episode_progress values must be in [0, 1]' in shared
     assert 'bash "${TRAIN_LAUNCHER}" "$@"' in vast
 
 

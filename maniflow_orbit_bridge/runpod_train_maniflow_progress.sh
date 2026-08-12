@@ -18,6 +18,7 @@ MINICONDA_DIR="${MINICONDA_DIR:-${WORKSPACE_DIR}/miniconda3}"
 
 SOURCE_CHECKPOINT="${SOURCE_CHECKPOINT:-}"
 SOURCE_STATE_KEY="${SOURCE_STATE_KEY:-ema_model}"
+RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
 DATASET_ZARR="${DATASET_ZARR:-}"
 
 RUN_NAME="${RUN_NAME:-maniflow_progress_phase1a}"
@@ -77,6 +78,13 @@ for integer_setting in \
 done
 
 SOURCE_CHECKPOINT="$(realpath --canonicalize-missing --no-symlinks "${SOURCE_CHECKPOINT}")"
+if [[ -n "${RESUME_CHECKPOINT}" ]]; then
+    if [[ ! -f "${RESUME_CHECKPOINT}" ]]; then
+        echo "Progress resume checkpoint not found: ${RESUME_CHECKPOINT}"
+        exit 1
+    fi
+    RESUME_CHECKPOINT="$(realpath --canonicalize-missing --no-symlinks "${RESUME_CHECKPOINT}")"
+fi
 DATASET_ZARR="$(readlink -f "${DATASET_ZARR}")"
 OUTPUT_DIR="$(mkdir -p "${OUTPUT_DIR}" && readlink -f "${OUTPUT_DIR}")"
 export PYTHONPATH="${MANIFLOW_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
@@ -143,6 +151,18 @@ if missing:
 
 episode_ends = root["meta/episode_ends"][:]
 progress_valid = root["data/progress_valid"][:]
+progress = root["data/episode_progress"][:]
+if len(episode_ends) == 0 or (episode_ends[1:] <= episode_ends[:-1]).any():
+    raise ValueError("meta/episode_ends must be nonempty and strictly increasing")
+total_frames = int(episode_ends[-1])
+for key in required[:-1]:
+    if len(root[key]) != total_frames:
+        raise ValueError(f"{key} length {len(root[key])} does not match episode boundary {total_frames}")
+valid_progress = progress[progress_valid]
+if not ((valid_progress >= 0).all() and (valid_progress <= 1).all()):
+    raise ValueError("Valid episode_progress values must be in [0, 1]")
+if not __import__("numpy").isfinite(valid_progress).all():
+    raise ValueError("Valid episode_progress values must be finite")
 starts = [0, *episode_ends[:-1]]
 supervised = sum(bool(progress_valid[start:end].any()) for start, end in zip(starts, episode_ends, strict=True))
 if float(os.environ["VAL_RATIO"]) > 0 and supervised < 2:
@@ -155,6 +175,13 @@ PY
 python "${ORBIT_DIR}/maniflow_orbit_bridge/install_into_maniflow.py" \
     --maniflow-dir "${MANIFLOW_DIR}" \
     --overwrite
+
+python - <<'PY'
+from maniflow.dataset.orbit_image_dataset import OrbitImageDataset
+from maniflow.policy.maniflow_progress_value_policy import ManiFlowProgressValuePolicy
+
+print("Progress policy and dataset imports resolve from the selected ManiFlow checkout.")
+PY
 
 HYDRA_OVERRIDES=(
     "source_checkpoint='${SOURCE_CHECKPOINT}'"
@@ -179,6 +206,14 @@ HYDRA_OVERRIDES=(
     "logging.name='${RUN_NAME}'"
 )
 
+if [[ -n "${RESUME_CHECKPOINT}" ]]; then
+    HYDRA_OVERRIDES+=("training.resume_from_checkpoint='${RESUME_CHECKPOINT}'")
+fi
+if [[ "${NUM_WORKERS}" == "0" ]]; then
+    HYDRA_OVERRIDES+=("dataloader.persistent_workers=false")
+    HYDRA_OVERRIDES+=("val_dataloader.persistent_workers=false")
+fi
+
 if [[ -n "${NUM_GRAD_STEPS}" ]]; then
     if [[ ! "${NUM_GRAD_STEPS}" =~ ^[1-9][0-9]*$ ]]; then
         echo "NUM_GRAD_STEPS must be a positive integer, got: ${NUM_GRAD_STEPS}"
@@ -195,6 +230,9 @@ fi
 
 echo "Starting Phase 1A ManiFlow progress training"
 echo "  checkpoint: ${SOURCE_CHECKPOINT} [${SOURCE_STATE_KEY}]"
+if [[ -n "${RESUME_CHECKPOINT}" ]]; then
+    echo "  resume:     ${RESUME_CHECKPOINT}"
+fi
 echo "  dataset:    ${DATASET_ZARR}"
 echo "  output:     ${OUTPUT_DIR}"
 echo "  device:     ${GPU_DEVICE}"

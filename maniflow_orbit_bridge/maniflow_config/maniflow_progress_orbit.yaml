@@ -104,6 +104,7 @@ training:
   num_epochs: 100
   num_grad_steps: null
   gradient_accumulate_every: 1
+  resume_from_checkpoint: null
   use_ema: true
   val_every: 1
   checkpoint_every: 1

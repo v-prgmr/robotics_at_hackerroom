@@ -28,7 +28,33 @@ def test_progress_workspace_reports_optimizer_step_progress():
 
     assert 'desc="Progress optimizer steps"' in workspace
     assert '"train_progress_mse_step": accumulated_mse' in workspace
-    assert "step=self.optimizer_step" in workspace
+    assert '"train_progress_valid_count_step": step_valid_count' in workspace
+    assert "run.finish(exit_code=1 if run_failed else 0)" in workspace
+
+
+def test_progress_workspace_restores_resume_state():
+    workspace = (
+        pathlib.Path(__file__).parents[1]
+        / "maniflow_orbit_bridge/maniflow_workspace/train_maniflow_progress_workspace.py"
+    ).read_text()
+
+    assert "self._load_progress_checkpoint(resume_checkpoint)" in workspace
+    assert 'self.model.load_state_dict(state_dicts["model"], strict=True)' in workspace
+    assert 'self.optimizer.load_state_dict(state_dicts["optimizer"])' in workspace
+    assert 'required.update({"ema_model", "ema"})' in workspace
+    assert 'include_keys = ("global_step", "optimizer_step", "epoch")' in workspace
+
+
+def test_progress_dataset_uses_designated_validation_mask():
+    dataset = (
+        pathlib.Path(__file__).parents[1]
+        / "maniflow_orbit_bridge/maniflow_dataset/orbit_image_dataset.py"
+    ).read_text()
+
+    assert "self.val_mask = val_mask" in dataset
+    assert "episode_mask=self.val_mask" in dataset
+    assert "episode_mask=~self.train_mask" not in dataset
+    assert "progress_only requires horizon == n_obs_steps" in dataset
 
 
 class TopRewardManiFlowTransformerImagePolicy(nn.Module):
@@ -137,7 +163,7 @@ def test_frozen_modules_remain_eval_during_training(policy):
 def test_masked_progress_loss_and_zero_valid_batch(policy):
     batch = {
         "obs": observations(3),
-        "progress_target": torch.tensor([0.5, -0.5, 100.0]),
+        "progress_target": torch.tensor([0.5, 0.25, 100.0]),
         "progress_valid": torch.tensor([True, True, False]),
     }
     prediction = policy.predict_progress(batch["obs"]).detach().reshape(-1)
@@ -153,6 +179,20 @@ def test_masked_progress_loss_and_zero_valid_batch(policy):
     assert zero_loss.item() == 0.0
     assert zero_metrics["progress_valid_count"] == 0
     assert all(parameter.grad is not None for parameter in policy.progress_head.parameters())
+
+
+def test_valid_progress_targets_must_be_finite_and_normalized(policy):
+    batch = {
+        "obs": observations(2),
+        "progress_target": torch.tensor([0.5, 1.1]),
+        "progress_valid": torch.tensor([True, True]),
+    }
+    with pytest.raises(ValueError, match=r"in \[0, 1\]"):
+        policy.compute_loss(batch)
+
+    batch["progress_target"] = torch.tensor([0.5, float("nan")])
+    with pytest.raises(ValueError, match="finite"):
+        policy.compute_loss(batch)
 
 
 def test_source_loader_allows_exactly_missing_progress_head(policy):

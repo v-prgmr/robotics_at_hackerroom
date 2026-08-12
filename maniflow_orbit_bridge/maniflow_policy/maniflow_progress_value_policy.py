@@ -115,7 +115,12 @@ class ManiFlowProgressValuePolicy(TopRewardManiFlowTransformerImagePolicy):
                 "progress_valid_count": 0,
             }
 
-        error = prediction[valid] - target[valid]
+        valid_targets = target[valid]
+        if not torch.isfinite(valid_targets).all():
+            raise ValueError("Valid progress targets must be finite")
+        if (valid_targets < 0).any() or (valid_targets > 1).any():
+            raise ValueError("Valid progress targets must be in [0, 1]")
+        error = prediction[valid] - valid_targets
         loss = error.square().mean()
         return loss, {
             "progress_loss": loss.item(),

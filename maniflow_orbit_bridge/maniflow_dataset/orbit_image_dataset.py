@@ -54,6 +54,8 @@ class OrbitImageDataset(BaseDataset):
         self.progress_only = bool(progress_only)
         if not 1 <= self.n_obs_steps <= self.horizon:
             raise ValueError("n_obs_steps must be between 1 and horizon")
+        if self.progress_only and self.horizon != self.n_obs_steps:
+            raise ValueError("progress_only requires horizon == n_obs_steps")
         self.task_names = self._load_task_names()
 
         cprint(f"Loading OrbitImageDataset from {self.zarr_path}", "green")
@@ -91,6 +93,7 @@ class OrbitImageDataset(BaseDataset):
             episode_mask=train_mask,
         )
         self.train_mask = train_mask
+        self.val_mask = val_mask
         self.train_episodes_num = int(np.sum(train_mask))
         self.val_episodes_num = int(np.sum(val_mask))
 
@@ -115,9 +118,10 @@ class OrbitImageDataset(BaseDataset):
             pad_before=self.pad_before,
             pad_after=self.pad_after,
             keys=[*self.cameras, "state", "action", "task_index", "topreward_weight", "action_valid"],
-            episode_mask=~self.train_mask,
+            episode_mask=self.val_mask,
         )
-        val_set.train_mask = ~self.train_mask
+        val_set.train_mask = np.zeros_like(self.train_mask)
+        val_set.val_mask = self.val_mask.copy()
         return val_set
 
     def get_normalizer(self, mode="limits", **kwargs):
