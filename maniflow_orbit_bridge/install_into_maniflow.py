@@ -63,6 +63,10 @@ def install(maniflow_dir: Path, *, overwrite: bool = False) -> None:
 
     files = [
         (
+            source_dir / "data_path_helpers.py",
+            package_dir / "dataset/orbit_data_path_helpers.py",
+        ),
+        (
             source_dir / "maniflow_dataset/orbit_image_dataset.py",
             package_dir / "dataset/orbit_image_dataset.py",
         ),
@@ -75,8 +79,16 @@ def install(maniflow_dir: Path, *, overwrite: bool = False) -> None:
             package_dir / "policy/topreward_loss.py",
         ),
         (
+            source_dir / "maniflow_policy/maniflow_progress_value_policy.py",
+            package_dir / "policy/maniflow_progress_value_policy.py",
+        ),
+        (
             source_dir / "maniflow_config/maniflow_image_orbit.yaml",
             package_dir / "config/maniflow_image_orbit.yaml",
+        ),
+        (
+            source_dir / "maniflow_config/maniflow_progress_orbit.yaml",
+            package_dir / "config/maniflow_progress_orbit.yaml",
         ),
         (
             source_dir / "maniflow_config/finetune/dense.yaml",
@@ -101,6 +113,10 @@ def install(maniflow_dir: Path, *, overwrite: bool = False) -> None:
         (
             source_dir / "maniflow_workspace/train_maniflow_orbit_workspace.py",
             package_dir / "workspace/train_maniflow_orbit_workspace.py",
+        ),
+        (
+            source_dir / "maniflow_workspace/train_maniflow_progress_workspace.py",
+            package_dir / "workspace/train_maniflow_progress_workspace.py",
         ),
     ]
     for source, target in files:

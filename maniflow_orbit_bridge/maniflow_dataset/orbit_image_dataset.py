@@ -14,6 +14,8 @@ from maniflow.common.sampler import SequenceSampler, downsample_mask, get_val_ma
 from maniflow.dataset.base_dataset import BaseDataset
 from maniflow.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 
+from maniflow.dataset.orbit_data_path_helpers import latest_real_observation_index, progress_episode_masks
+
 
 def _to_torch_preserve_strings(value: Any) -> Any:
     if isinstance(value, dict):
@@ -37,6 +39,8 @@ class OrbitImageDataset(BaseDataset):
         val_ratio=0.02,
         max_train_episodes=None,
         load_to_memory=False,
+        n_obs_steps=1,
+        progress_only=False,
         **kwargs,
     ):
         super().__init__()
@@ -46,10 +50,15 @@ class OrbitImageDataset(BaseDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.load_to_memory = load_to_memory
+        self.n_obs_steps = int(n_obs_steps)
+        self.progress_only = bool(progress_only)
+        if not 1 <= self.n_obs_steps <= self.horizon:
+            raise ValueError("n_obs_steps must be between 1 and horizon")
         self.task_names = self._load_task_names()
 
         cprint(f"Loading OrbitImageDataset from {self.zarr_path}", "green")
-        buffer_keys = [*self.cameras, "state", "action", "task_index", "topreward_weight", "action_valid"]
+        sample_keys = [*self.cameras, "state", "action", "task_index", "topreward_weight", "action_valid"]
+        buffer_keys = [*sample_keys, "episode_progress", "progress_valid", "source_episode_index"]
         if load_to_memory:
             self.replay_buffer = ReplayBuffer.copy_from_path(self.zarr_path, keys=buffer_keys)
         else:
@@ -58,10 +67,19 @@ class OrbitImageDataset(BaseDataset):
             if missing:
                 raise KeyError(f"Missing required zarr data keys: {missing}")
 
-        val_mask = get_val_mask(n_episodes=self.replay_buffer.n_episodes, val_ratio=val_ratio, seed=seed)
-        train_mask = ~val_mask
+        eligible_mask = np.ones(self.replay_buffer.n_episodes, dtype=bool)
+        if self.progress_only:
+            train_mask, val_mask = progress_episode_masks(
+                self.replay_buffer.episode_ends[:],
+                self.replay_buffer["progress_valid"][:],
+                val_ratio=val_ratio,
+                seed=seed,
+            )
+        else:
+            val_mask = get_val_mask(n_episodes=self.replay_buffer.n_episodes, val_ratio=val_ratio, seed=seed)
+            train_mask = eligible_mask & ~val_mask
         if max_train_episodes is None:
-            max_train_episodes = self.replay_buffer.n_episodes - np.sum(val_mask)
+            max_train_episodes = int(np.sum(train_mask))
         train_mask = downsample_mask(mask=train_mask, max_n=max_train_episodes, seed=seed)
 
         self.sampler = SequenceSampler(
@@ -69,7 +87,7 @@ class OrbitImageDataset(BaseDataset):
             sequence_length=horizon,
             pad_before=pad_before,
             pad_after=pad_after,
-            keys=buffer_keys,
+            keys=sample_keys,
             episode_mask=train_mask,
         )
         self.train_mask = train_mask
@@ -132,8 +150,23 @@ class OrbitImageDataset(BaseDataset):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         sample = self.sampler.sample_sequence(idx)
-        _, _, sample_start_idx, sample_end_idx = self.sampler.indices[idx]
+        sampler_index = self.sampler.indices[idx]
+        _, _, sample_start_idx, sample_end_idx = sampler_index
         action_valid_mask = np.zeros(self.horizon, dtype=bool)
         action_valid_mask[sample_start_idx:sample_end_idx] = True
         data = self._sample_to_data(sample, action_valid_mask)
+        target_index = latest_real_observation_index(sampler_index, self.n_obs_steps)
+        data["progress_target"] = np.asarray(
+            self.replay_buffer["episode_progress"][target_index], dtype=np.float32
+        )
+        data["progress_valid"] = np.asarray(
+            self.replay_buffer["progress_valid"][target_index], dtype=np.bool_
+        )
+        data["source_episode_index"] = np.asarray(
+            self.replay_buffer["source_episode_index"][target_index], dtype=np.int64
+        )
+        data["episode_index"] = np.asarray(
+            np.searchsorted(self.replay_buffer.episode_ends[:], target_index, side="right"),
+            dtype=np.int64,
+        )
         return _to_torch_preserve_strings(data)

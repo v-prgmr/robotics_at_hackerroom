@@ -209,6 +209,14 @@ This writes one 75-episode dataset containing 25 expert demonstrations, 25 HIL/R
 source contains 76,902 timesteps. The converter validates every score sidecar and trajectory before
 creating the output, then records collection, episode, and frame provenance in the zarr sidecar.
 
+Both converters also write `data/episode_progress` and `data/progress_valid`. Progress is computed at
+the original source resolution as `t / (N - 1)`, with a singleton episode assigned `0`, before
+`--frame-stride` is applied. Expert demonstrations and complete successful autonomous rollouts are
+supervised; HIL/correction clips and failures are retained but masked from Phase 1 progress regression.
+The exact role and formula are persisted in `orbit_tasks.json`. For the single-collection LeRobot
+converter, pass `--source-role expert`, `success`, `hil`, `correction`, or `failure`; it defaults to
+`expert` for the existing demonstration conversion.
+
 Raw `logp_true` differences, `beta=0.2`, an upper cap of `2`, flow-only policy weighting, and no lower
 weight clamp are the defaults. Use repeated `--collection NAME` options to create a controlled subset.
 
@@ -301,6 +309,7 @@ Converter args:
 - `--topreward-score-mode`: defaults to paper-baseline `raw_logp_true`; `normalized_progress` is an explicit diagnostic ablation.
 - `--topreward-exponent-scale`: defaults to `0.2` for raw log-probabilities and `2.0` for normalized progress.
 - `--topreward-max-weight`: upper-only cap, default `2.0`. No lower clamp is applied.
+- `--source-role`: explicit trajectory role controlling progress supervision for LeRobot conversion.
 - `--overwrite`: replace the output zarr if it already exists.
 
 The converter writes:
@@ -870,7 +879,113 @@ uv run bimanual-maniflow-inference \
 
 Space arms policy control and begins a staged episode. The robot controller continues at 60 Hz, while rollout rows are sampled at `policy_action_hz` (16.57 Hz for this dataset) to match the expert demonstrations. Each selected tick records the follower state, matched cameras, and exact post-clipping command with `action_source=policy`, `action_source=request_hold`, or `action_source=hold`. Press `f` or `s` to include the current terminal tick, publish the episode to the corresponding root, and disarm/reset the policy. Unclassified episodes are discarded. Success and failure roots each use their own contiguous episode numbering.
 
-The policy server keeps the rolling `n_obs_steps` ManiFlow history and returns Orbit action chunks shaped `[n_action_steps, 12]`. The robot client still owns camera matching, stale-frame rejection, action age checks, max-delta checks, debug traces, Rerun telemetry, homing, and emergency stop behavior.
+The policy server keeps the rolling `n_obs_steps` ManiFlow history and returns Orbit action chunks shaped `[n_action_steps, 12]`. Progress checkpoints additionally return an optional scalar `progress` NPZ member. Existing clients continue reading the unchanged `actions` member; the updated client exposes the optional value as `runtime.latest_progress`.
+
+## Train The Phase 1A Progress Probe
+
+Install the bridge files into the ManiFlow checkout after conversion:
+
+```bash
+python maniflow_orbit_bridge/install_into_maniflow.py \
+    --maniflow-dir ./maniflow \
+    --overwrite
+```
+
+Run progress-only training with the dedicated launcher. The source checkpoint must contain the trained
+policy under `state_dicts.ema_model`; loading is strict except for the new `progress_head.*` keys.
+
+```bash
+SOURCE_CHECKPOINT=/absolute/path/to/trained_maniflow.ckpt \
+DATASET_ZARR=/absolute/path/to/teabags_kitting_full_topreward_maniflow.zarr \
+bash maniflow_orbit_bridge/runpod_train_maniflow_progress.sh
+```
+
+On Vast.ai, use the Vast wrapper instead. It defaults to persistent paths under `/workspace` and can
+optionally destroy the instance only after the training process exits successfully:
+
+```bash
+SOURCE_CHECKPOINT=/workspace/checkpoints/trained_maniflow.ckpt \
+DATASET_ZARR=/workspace/dataset/teabags_kitting_full_topreward_maniflow.zarr \
+RUN_NAME=maniflow_progress_phase1a \
+bash maniflow_orbit_bridge/vast_train_maniflow_progress.sh
+```
+
+To destroy the Vast instance after a successful run:
+
+```bash
+export VAST_DESTROY_ON_EXIT=true
+export VAST_DESTROY_ON_SUCCESS_ONLY=true
+export VAST_API_KEY=your-vast-api-key
+export VAST_INSTANCE_ID=12345678
+```
+
+Leave `VAST_DESTROY_ON_EXIT=false` while testing so a configuration or dependency error does not
+terminate the instance. The wrapper delegates all progress-training variables and command-line Hydra
+overrides to `runpod_train_maniflow_progress.sh`.
+
+Required environment variables:
+
+- `SOURCE_CHECKPOINT`: trained ManiFlow checkpoint used to initialize the frozen representation.
+- `DATASET_ZARR`: converted zarr containing progress targets, validity masks, and provenance.
+
+Common optional variables:
+
+```bash
+export WORKSPACE_DIR=/workspace
+export ORBIT_DIR=/workspace/orbit
+export MANIFLOW_DIR=/workspace/maniflow
+export CONDA_ENV_DIR=/workspace/conda_envs/maniflow
+export SOURCE_STATE_KEY=ema_model
+export RUN_NAME=maniflow_progress_phase1a
+export OUTPUT_DIR=/workspace/outputs/train/${RUN_NAME}
+export GPU_DEVICE=cuda:0
+export BATCH_SIZE=32
+export NUM_WORKERS=4
+export NUM_EPOCHS=100
+export LEARNING_RATE=1.0e-4
+export WEIGHT_DECAY=1.0e-3
+export PROGRESS_HIDDEN_DIM=512
+export SPLIT_SEED=42
+export VAL_RATIO=0.1
+export VAL_EVERY=1
+export CHECKPOINT_EVERY=1
+export LOGGING_MODE=online
+export WANDB_API_KEY=your-key
+```
+
+For a short smoke run:
+
+```bash
+SOURCE_CHECKPOINT=/absolute/path/to/trained_maniflow.ckpt \
+DATASET_ZARR=/absolute/path/to/progress-enabled.zarr \
+NUM_EPOCHS=1 \
+BATCH_SIZE=2 \
+NUM_WORKERS=0 \
+MAX_TRAIN_STEPS=2 \
+MAX_VAL_STEPS=2 \
+LOGGING_MODE=disabled \
+bash maniflow_orbit_bridge/runpod_train_maniflow_progress.sh
+```
+
+Additional arguments are forwarded as Hydra overrides, for example
+`policy.progress_hidden_dim=256 training.use_ema=false`. Before training, the launcher validates the
+active environment, checkpoint state key, required zarr arrays, and availability of at least two
+progress-supervised episodes when validation is enabled.
+
+Only `progress_head.*` is optimized. The observation encoder, ViT/CLIP modules, DiT-X action model,
+and T5 encoder remain frozen and in evaluation mode. Validation uses complete held-out supervised
+episodes and selects checkpoints by `val_progress_mse`.
+
+Evaluate a progress checkpoint through the existing server:
+
+```bash
+conda run -n maniflow python maniflow_orbit_bridge/maniflow_policy_server.py \
+    --checkpoint /absolute/path/to/progress-checkpoint.ckpt \
+    --device cuda:0 \
+    --port 8765
+```
+
+The robot client still owns camera matching, stale-frame rejection, action age checks, max-delta checks, debug traces, Rerun telemetry, homing, and emergency stop behavior.
 
 ## Data Semantics
 

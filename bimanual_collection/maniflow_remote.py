@@ -81,6 +81,7 @@ class ManiFlowRemotePolicyRuntime:
         self.image_feature_keys = [f"observation.images.{camera}" for camera in self.cameras]
         self.server_metadata: dict[str, Any] = {}
         self.n_obs_steps = 1
+        self.latest_progress: float | None = None
 
     def load(self) -> None:
         self.server_metadata = self._get_json("/health")
@@ -101,6 +102,12 @@ class ManiFlowRemotePolicyRuntime:
         response = self._post_bytes("/predict", payload)
         with np.load(BytesIO(response), allow_pickle=False) as arrays:
             actions = np.asarray(arrays["actions"], dtype=np.float32)
+            self.latest_progress = None
+            if "progress" in arrays.files:
+                progress = np.asarray(arrays["progress"], dtype=np.float32)
+                if progress.size != 1:
+                    raise ValueError(f"Expected scalar progress, got shape {progress.shape}")
+                self.latest_progress = float(progress.reshape(-1)[0])
         if actions.ndim == 3 and actions.shape[0] == 1:
             actions = actions[0]
         if actions.ndim == 1:

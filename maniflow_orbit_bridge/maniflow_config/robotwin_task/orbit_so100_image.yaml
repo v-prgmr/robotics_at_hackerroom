@@ -31,6 +31,7 @@ dataset:
     - left_wrist
     - right_wrist
   horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42

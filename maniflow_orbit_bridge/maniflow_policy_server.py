@@ -111,6 +111,7 @@ class ManiFlowPolicyService:
             "n_action_steps": self.n_action_steps,
             "action_dim": self.action_dim,
             "loaded": self.policy is not None,
+            "supports_progress": callable(getattr(self.policy, "predict_progress", None)),
         }
 
     def reset(self) -> None:
@@ -118,6 +119,9 @@ class ManiFlowPolicyService:
             self._history.clear()
 
     def predict(self, payload_bytes: bytes) -> np.ndarray:
+        return self.predict_with_progress(payload_bytes)["actions"]
+
+    def predict_with_progress(self, payload_bytes: bytes) -> dict[str, np.ndarray]:
         if self.policy is None:
             raise RuntimeError("Policy is not loaded")
 
@@ -135,10 +139,16 @@ class ManiFlowPolicyService:
 
         with torch.inference_mode():
             result = self.policy.predict_action(obs_dict)
+            progress = None
+            if callable(getattr(self.policy, "predict_progress", None)):
+                progress = self.policy.predict_progress(obs_dict)
         actions = result["action"].detach().cpu().numpy().astype(np.float32)
         if actions.ndim == 3 and actions.shape[0] == 1:
             actions = actions[0]
-        return actions
+        response = {"actions": actions}
+        if progress is not None:
+            response["progress"] = progress.detach().cpu().numpy().astype(np.float32)
+        return response
 
     def _decode_payload(self, payload_bytes: bytes) -> list[dict[str, Any]]:
         with np.load(BytesIO(payload_bytes), allow_pickle=False) as arrays:
@@ -214,9 +224,9 @@ class PolicyRequestHandler(BaseHTTPRequestHandler):
             if self.path == "/predict":
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = self.rfile.read(length)
-                actions = self.service.predict(payload)
+                result = self.service.predict_with_progress(payload)
                 buffer = BytesIO()
-                np.savez_compressed(buffer, actions=actions)
+                np.savez_compressed(buffer, **result)
                 self._send_bytes(buffer.getvalue(), content_type="application/octet-stream")
                 return
             self.send_error(404, "unknown endpoint")

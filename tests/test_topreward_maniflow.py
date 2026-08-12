@@ -17,6 +17,13 @@ from maniflow_orbit_bridge.convert_orbit_topreward_to_maniflow import (
     build_arg_parser as build_full_arg_parser,
     discover_episodes,
 )
+from maniflow_orbit_bridge.data_path_helpers import (
+    classify_collection_role,
+    classify_source_role,
+    latest_real_observation_index,
+    progress_episode_masks,
+    source_episode_progress,
+)
 
 
 def _anchors(indices, scores):
@@ -32,6 +39,45 @@ def test_converter_defaults_to_revised_paper_weighting():
     assert args.topreward_score_mode == "raw_logp_true"
     assert args.topreward_exponent_scale is None
     assert args.topreward_max_weight == 2.0
+    assert args.source_role == "expert"
+
+
+def test_source_progress_is_exact_before_stride_and_handles_singleton():
+    progress, valid = source_episode_progress(5, valid=True)
+
+    np.testing.assert_array_equal(progress[[0, 2, 4]], np.asarray([0.0, 0.5, 1.0], dtype=np.float32))
+    np.testing.assert_array_equal(valid, np.ones(5, dtype=np.bool_))
+    singleton, singleton_valid = source_episode_progress(1, valid=False)
+    np.testing.assert_array_equal(singleton, np.zeros(1, dtype=np.float32))
+    np.testing.assert_array_equal(singleton_valid, np.zeros(1, dtype=np.bool_))
+
+
+@pytest.mark.parametrize(
+    ("collection", "expected"),
+    [
+        ("teabags_kitting_50_v2", ("expert", True)),
+        ("successes", ("success", True)),
+        ("maniflow_hil_bounded", ("correction", False)),
+        ("failures", ("failure", False)),
+    ],
+)
+def test_collection_progress_roles_are_explicit(collection, expected):
+    assert classify_collection_role(collection) == expected
+
+
+def test_unknown_progress_roles_fail_clearly():
+    with pytest.raises(ValueError, match="Unknown Orbit collection role"):
+        classify_collection_role("new_unclassified_collection")
+    with pytest.raises(ValueError, match="Unknown source role"):
+        classify_source_role("demonstration-ish")
+
+
+def test_latest_real_observation_index_uses_sampler_padding_offsets():
+    assert latest_real_observation_index((10, 15, 1, 6), n_obs_steps=2) == 10
+    assert latest_real_observation_index((10, 15, 0, 5), n_obs_steps=2) == 11
+    assert latest_real_observation_index((10, 11, 0, 1), n_obs_steps=2) == 10
+    with pytest.raises(ValueError, match="does not contain a real"):
+        latest_real_observation_index((10, 15, 2, 7), n_obs_steps=2)
 
 
 def test_full_converter_output_modes_are_mutually_exclusive():
@@ -175,6 +221,20 @@ def test_flat_progress_and_unmeasured_actions_remain_neutral():
     np.testing.assert_array_equal(weight, np.ones(4, dtype=np.float32))
 
 
+def test_one_frame_topreward_episode_is_neutral():
+    delta, unclipped, weight = compute_topreward_action_arrays(
+        total_frames=1,
+        anchors=_anchors([0], [-2.0]),
+        score_mode="raw_logp_true",
+        exponent_scale=0.2,
+        max_weight=2.0,
+    )
+
+    np.testing.assert_array_equal(delta, np.zeros(1, dtype=np.float32))
+    np.testing.assert_array_equal(unclipped, np.ones(1, dtype=np.float32))
+    np.testing.assert_array_equal(weight, np.ones(1, dtype=np.float32))
+
+
 def test_raw_logp_ablation_uses_configured_beta_without_lower_clamp():
     _, unclipped, weight = compute_topreward_action_arrays(
         total_frames=3,
@@ -232,3 +292,18 @@ def test_masked_weighted_mean_excludes_padding_without_weight_normalization():
     assert masked_weighted_mean(elementwise, valid, weights).item() == pytest.approx(1.25)
     with pytest.raises(ValueError, match="no valid actions"):
         masked_weighted_mean(elementwise, torch.zeros_like(valid), weights)
+
+
+def test_progress_split_is_deterministic_episode_level_and_excludes_invalid_episodes():
+    episode_ends = np.asarray([3, 6, 9, 12])
+    valid = np.asarray([True] * 3 + [False] * 3 + [True] * 6)
+
+    train_a, val_a = progress_episode_masks(episode_ends, valid, val_ratio=0.34, seed=7)
+    train_b, val_b = progress_episode_masks(episode_ends, valid, val_ratio=0.34, seed=7)
+
+    np.testing.assert_array_equal(train_a, train_b)
+    np.testing.assert_array_equal(val_a, val_b)
+    assert not np.any(train_a & val_a)
+    assert not train_a[1] and not val_a[1]
+    assert np.sum(train_a) == 2
+    assert np.sum(val_a) == 1

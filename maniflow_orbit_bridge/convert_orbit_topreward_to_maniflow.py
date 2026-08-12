@@ -21,8 +21,10 @@ if __package__:
         TOPREWARD_SCORE_MODES,
         compute_topreward_action_arrays,
     )
+    from maniflow_orbit_bridge.data_path_helpers import classify_collection_role, source_episode_progress
 else:
     from convert_orbit_lerobot_to_maniflow import TOPREWARD_SCORE_MODES, compute_topreward_action_arrays
+    from data_path_helpers import classify_collection_role, source_episode_progress
 
 
 DEFAULT_CAMERAS = ("overhead", "left_wrist", "right_wrist")
@@ -44,6 +46,8 @@ class EpisodeSpec:
     source_frames: int
     output_frames: int
     task: str
+    source_role: str
+    progress_valid: bool
 
 
 class SequentialVideoFrameReader:
@@ -125,6 +129,7 @@ def discover_episodes(
     specs: list[EpisodeSpec] = []
     expected_dims: tuple[int, int] | None = None
     for collection_path in _collection_paths(orbit_root, collections):
+        source_role, progress_valid = classify_collection_role(collection_path.name)
         episode_paths = sorted(path for path in collection_path.glob("episode-*") if path.is_dir())
         for episode_path in episode_paths:
             if max_episodes is not None and len(specs) >= max_episodes:
@@ -192,6 +197,8 @@ def discover_episodes(
                     source_frames=len(timesteps),
                     output_frames=(len(timesteps) + frame_stride - 1) // frame_stride,
                     task=str(metadata.get("task_description", "")),
+                    source_role=source_role,
+                    progress_valid=progress_valid,
                 )
             )
     return specs
@@ -356,6 +363,8 @@ def convert(
             "episode_id": spec.episode_id,
             "source_frames": spec.source_frames,
             "output_frames": spec.output_frames,
+            "source_role": spec.source_role,
+            "progress_valid": spec.progress_valid,
         }
         for output_episode_index, spec in enumerate(specs)
     }
@@ -437,6 +446,8 @@ def convert(
             ("source_collection_index", np.int64, 0),
             ("source_episode_index", np.int64, 0),
             ("source_frame_index", np.int64, 0),
+            ("episode_progress", np.float32, 0),
+            ("progress_valid", np.bool_, 0),
         ):
             data_group.full(
                 name,
@@ -462,6 +473,8 @@ def convert(
         "source_collection_index",
         "source_episode_index",
         "source_frame_index",
+        "episode_progress",
+        "progress_valid",
     )
     arrays = {name: root[f"data/{name}"] for name in array_names}
     conversion_started = time.perf_counter()
@@ -483,6 +496,9 @@ def convert(
                 max_weight=max_weight,
             )
             kept = np.arange(0, spec.source_frames, frame_stride)
+            source_progress, source_valid = source_episode_progress(
+                spec.source_frames, valid=spec.progress_valid
+            )
             camera_futures = [
                 executor.submit(
                     _write_episode_camera,
@@ -513,6 +529,8 @@ def convert(
             arrays["source_frame_index"][write_start:write_end] = timesteps["timestep_index"].to_numpy(
                 dtype=np.int64
             )
+            arrays["episode_progress"][write_start:write_end] = source_progress[kept]
+            arrays["progress_valid"][write_start:write_end] = source_valid[kept]
             camera_results = [future.result() for future in camera_futures]
 
             completed_episodes.add(output_episode_index)
@@ -533,6 +551,20 @@ def convert(
         "source_topreward_results": str(topreward_results),
         "collection_names": {str(index): name for index, name in enumerate(collection_names)},
         "episodes": episode_provenance,
+        "collection_roles": {
+            name: {
+                "source_role": classify_collection_role(name)[0],
+                "progress_valid": classify_collection_role(name)[1],
+            }
+            for name in collection_names
+        },
+        "progress": {
+            "target": "full-episode normalized temporal progress",
+            "formula": "source_frame_index / (source_episode_frames - 1); singleton = 0",
+            "computed_before_frame_stride": True,
+            "phase_1_supervised_roles": ["expert", "success"],
+            "phase_1_excluded_roles": ["hil", "correction", "failure"],
+        },
         "image_size": image_size,
         "frame_stride": frame_stride,
         "state_dim": state_dim,

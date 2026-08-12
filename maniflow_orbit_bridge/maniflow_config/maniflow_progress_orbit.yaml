@@ -1,0 +1,129 @@
+defaults:
+  - robotwin_task: orbit_so100_image
+  - _self_
+
+name: train_maniflow_progress_orbit
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 16
+shape_meta: ${robotwin_task.shape_meta}
+source_checkpoint: ???
+source_state_key: ema_model
+
+policy:
+  _target_: maniflow.policy.maniflow_progress_value_policy.ManiFlowProgressValuePolicy
+  shape_meta: ${shape_meta}
+  horizon: ${horizon}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 10
+  obs_as_global_cond: true
+  block_type: DiTX
+  n_layer: 12
+  n_head: 8
+  n_emb: 768
+  visual_cond_len: 1024
+  qkv_bias: true
+  qk_norm: true
+  language_conditioned: true
+  pre_norm_modality: false
+  flow_batch_ratio: 0.75
+  consistency_batch_ratio: 0.25
+  sample_t_mode_flow: beta
+  sample_t_mode_consistency: discrete
+  sample_dt_mode_consistency: uniform
+  sample_target_t_mode: relative
+  denoise_timesteps: 10
+  diffusion_timestep_embed_dim: 128
+  diffusion_target_t_embed_dim: 128
+  progress_hidden_dim: 512
+  progress_rgb_keys: [overhead, left_wrist, right_wrist]
+  obs_encoder:
+    _target_: maniflow.model.vision_2d.transformer_obs_encoder.TransformerObsEncoder
+    shape_meta: ${shape_meta}
+    global_pool: ''
+    n_emb: ${policy.n_emb}
+    model_name: vit_base_patch16_clip_224.openai
+    pretrained: true
+    frozen: true
+    feature_aggregation: null
+    transforms: null
+    use_group_norm: false
+    share_rgb_model: false
+
+progress_dataset:
+  _target_: maniflow.dataset.orbit_image_dataset.OrbitImageDataset
+  zarr_path: ${robotwin_task.dataset.zarr_path}
+  cameras: ${robotwin_task.dataset.cameras}
+  horizon: ${policy.n_obs_steps}
+  n_obs_steps: ${policy.n_obs_steps}
+  pad_before: ${eval:'${policy.n_obs_steps}-1'}
+  pad_after: 0
+  seed: ${training.split_seed}
+  val_ratio: ${training.val_ratio}
+  max_train_episodes: null
+  load_to_memory: ${robotwin_task.dataset.load_to_memory}
+  progress_only: true
+
+dataloader:
+  batch_size: 32
+  num_workers: 4
+  shuffle: true
+  pin_memory: true
+  persistent_workers: true
+  drop_last: false
+
+val_dataloader:
+  batch_size: 32
+  num_workers: 4
+  shuffle: false
+  pin_memory: true
+  persistent_workers: false
+  drop_last: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 1.0e-3
+
+ema:
+  _target_: maniflow.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+training:
+  device: cuda:0
+  seed: 42
+  split_seed: 42
+  val_ratio: 0.1
+  num_epochs: 100
+  use_ema: true
+  val_every: 1
+  checkpoint_every: 1
+  max_train_steps: null
+  max_val_steps: null
+
+logging:
+  project: ManiFlow_Orbit
+  group: progress_phase_1a
+  name: ${training.seed}
+  mode: online
+  resume: false
+  tags: [orbit_so100, progress_value, phase_1a]
+
+checkpoint:
+  save_last_ckpt: true
+  topk:
+    monitor_key: val_progress_mse
+    mode: min
+    k: 3
+    format_str: epoch={epoch:04d}-val_progress_mse={val_progress_mse:.6f}.ckpt
+
+hydra:
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}

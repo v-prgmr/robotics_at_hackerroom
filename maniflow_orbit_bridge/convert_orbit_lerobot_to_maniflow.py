@@ -13,6 +13,15 @@ import cv2
 import numpy as np
 import pandas as pd
 
+if __package__:
+    from maniflow_orbit_bridge.data_path_helpers import (
+        SOURCE_ROLE_PROGRESS_VALID,
+        classify_source_role,
+        source_episode_progress,
+    )
+else:
+    from data_path_helpers import SOURCE_ROLE_PROGRESS_VALID, classify_source_role, source_episode_progress
+
 
 DEFAULT_CAMERAS = {
     "overhead": "observation.images.overhead",
@@ -136,6 +145,14 @@ def compute_topreward_action_arrays(
         raise ValueError("TOPReward exponent scale must be non-negative")
     if not math.isfinite(max_weight) or max_weight <= 0:
         raise ValueError("TOPReward max weight must be positive")
+    if total_frames == 1:
+        if len(anchors) != 1 or int(anchors[0]["anchor_timestep_index"]) != 0:
+            raise ValueError("A one-frame TOPReward episode must contain exactly one anchor at frame 0")
+        return (
+            np.zeros(1, dtype=np.float32),
+            np.ones(1, dtype=np.float32),
+            np.ones(1, dtype=np.float32),
+        )
     if len(anchors) < 2:
         raise ValueError("TOPReward requires at least two anchors per episode")
 
@@ -208,6 +225,7 @@ def convert(
     topreward_score_mode: str = "raw_logp_true",
     topreward_exponent_scale: float | None = None,
     topreward_max_weight: float = 2.0,
+    source_role: str = "expert",
 ) -> None:
     import numcodecs
     import zarr
@@ -222,6 +240,7 @@ def convert(
             raise ValueError("--topreward-dataset is required with --topreward-results")
     if topreward_score_mode not in TOPREWARD_SCORE_MODES:
         raise ValueError(f"Unsupported TOPReward score mode: {topreward_score_mode!r}")
+    source_role, source_progress_valid = classify_source_role(source_role)
     if topreward_exponent_scale is None:
         topreward_exponent_scale = 2.0 if topreward_score_mode == "normalized_progress" else 0.2
 
@@ -326,6 +345,12 @@ def convert(
     action_valid_array = data_group.ones(
         "action_valid", shape=(total_frames,), chunks=vector_chunks, dtype=np.bool_, compressor=compressor
     )
+    episode_progress_array = data_group.zeros(
+        "episode_progress", shape=(total_frames,), chunks=vector_chunks, dtype=np.float32, compressor=compressor
+    )
+    progress_valid_array = data_group.zeros(
+        "progress_valid", shape=(total_frames,), chunks=vector_chunks, dtype=np.bool_, compressor=compressor
+    )
     source_episode_index_array = data_group.zeros(
         "source_episode_index", shape=(total_frames,), chunks=vector_chunks, dtype=np.int64, compressor=compressor
     )
@@ -349,7 +374,11 @@ def convert(
             raise ValueError(
                 f"Episode {episode_index} length mismatch: metadata={source_length}, data={len(episode_data)}"
             )
-        episode_data = episode_data.sort_values("frame_index").iloc[::frame_stride]
+        episode_data = episode_data.sort_values("frame_index")
+        source_frame_indices = episode_data["frame_index"].to_numpy(dtype=np.int64)
+        if not np.array_equal(source_frame_indices, np.arange(source_length, dtype=np.int64)):
+            raise ValueError(f"Episode {episode_index} frame_index must be contiguous and zero-based")
+        episode_data = episode_data.iloc[::frame_stride]
         if len(episode_data) != output_length:
             raise ValueError(f"Episode {episode_index} output length mismatch after stride")
 
@@ -357,6 +386,11 @@ def convert(
         action_array[write_start:write_end] = _stack_vectors(episode_data["action"], key="action")
         source_episode_index_array[write_start:write_end] = episode_index
         source_frame_index_array[write_start:write_end] = episode_data["frame_index"].to_numpy(dtype=np.int64)
+        source_episode_ids.setdefault(episode_index, f"episode-{episode_index + 1:06d}")
+        source_progress, source_valid = source_episode_progress(source_length, valid=source_progress_valid)
+        kept = np.arange(0, source_length, frame_stride)
+        episode_progress_array[write_start:write_end] = source_progress[kept]
+        progress_valid_array[write_start:write_end] = source_valid[kept]
 
         if topreward_results is not None:
             payload = _load_topreward_episode(
@@ -372,7 +406,6 @@ def convert(
                 exponent_scale=topreward_exponent_scale,
                 max_weight=topreward_max_weight,
             )
-            kept = np.arange(0, source_length, frame_stride)
             delta_score_array[write_start:write_end] = delta_score[kept]
             weight_unclipped_array[write_start:write_end] = weight_unclipped[kept]
             topreward_weight_array[write_start:write_end] = topreward_weight[kept]
@@ -415,6 +448,14 @@ def convert(
         "state_dim": state_dim,
         "action_dim": action_dim,
         "source_episode_ids": {str(index): episode_id for index, episode_id in sorted(source_episode_ids.items())},
+        "progress": {
+            "source_role": source_role,
+            "valid": source_progress_valid,
+            "target": "full-episode normalized temporal progress",
+            "formula": "source_frame_index / (source_episode_frames - 1); singleton = 0",
+            "computed_before_frame_stride": True,
+            "phase_1_exclusions": ["hil", "correction", "failure"],
+        },
         "topreward": {
             "enabled": topreward_results is not None,
             "results_root": str(topreward_results) if topreward_results is not None else None,
@@ -466,6 +507,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Exponent scale. Defaults to 0.2 for raw logp_true and 2.0 for normalized progress.",
     )
     parser.add_argument("--topreward-max-weight", type=float, default=2.0, help="Upper weight cap.")
+    parser.add_argument(
+        "--source-role",
+        choices=tuple(SOURCE_ROLE_PROGRESS_VALID),
+        default="expert",
+        help="Explicit source semantics for progress validity. Defaults to expert for existing conversions.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Replace output zarr if it exists.")
     return parser
 
@@ -486,6 +533,7 @@ def main() -> None:
         topreward_score_mode=args.topreward_score_mode,
         topreward_exponent_scale=args.topreward_exponent_scale,
         topreward_max_weight=args.topreward_max_weight,
+        source_role=args.source_role,
     )
 
 

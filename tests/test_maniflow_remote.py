@@ -1,6 +1,7 @@
 from io import BytesIO
 
 import numpy as np
+import pytest
 
 from bimanual_collection.hardware.bimanual_robot import BimanualFollowerState, DEFAULT_JOINT_NAMES
 from bimanual_collection.hardware.cameras import CameraFrame, MatchedCameraFrame
@@ -106,6 +107,35 @@ def test_maniflow_remote_policy_runtime_posts_npz_and_reads_action_chunk(monkeyp
 
     assert normalized_actions is None
     np.testing.assert_array_equal(actions, np.arange(24, dtype=np.float32).reshape(2, 12))
+    assert runtime.latest_progress is None
+
+
+def test_maniflow_remote_reads_optional_progress_without_changing_action_api(monkeypatch):
+    runtime = ManiFlowRemotePolicyRuntime("http://127.0.0.1:8765")
+    observation = {
+        "agent_pos": np.arange(12, dtype=np.float32),
+        "task_name": "Pick one teabag.",
+        "images": {
+            camera: np.zeros((4, 5, 3), dtype=np.uint8)
+            for camera in ("overhead", "left_wrist", "right_wrist")
+        },
+    }
+
+    def fake_post(_path, _body):
+        buffer = BytesIO()
+        np.savez_compressed(
+            buffer,
+            actions=np.arange(12, dtype=np.float32)[None],
+            progress=np.asarray([[0.625]], dtype=np.float32),
+        )
+        return buffer.getvalue()
+
+    monkeypatch.setattr(runtime, "_post_bytes", fake_post)
+
+    actions = runtime.predict_action_chunk(observation)
+
+    assert actions.shape == (1, 12)
+    assert runtime.latest_progress == pytest.approx(0.625)
 
 
 def test_normalize_maniflow_server_url_adds_http_scheme():
