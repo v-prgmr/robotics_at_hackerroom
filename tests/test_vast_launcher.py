@@ -6,6 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_SCRIPT = ROOT / "maniflow_orbit_bridge/vast_setup_maniflow_env.sh"
 TRAIN_SCRIPT = ROOT / "maniflow_orbit_bridge/vast_train_maniflow_orbit.sh"
+PROGRESS_TRAIN_SCRIPT = ROOT / "maniflow_orbit_bridge/runpod_train_maniflow_progress.sh"
+VAST_PROGRESS_TRAIN_SCRIPT = ROOT / "maniflow_orbit_bridge/vast_train_maniflow_progress.sh"
 
 
 def _write_script(path: Path, body: str) -> Path:
@@ -50,6 +52,19 @@ def test_vast_wrappers_default_to_workspace_volume():
 
     assert expected in SETUP_SCRIPT.read_text()
     assert expected in TRAIN_SCRIPT.read_text()
+    assert expected in VAST_PROGRESS_TRAIN_SCRIPT.read_text()
+
+
+def test_progress_launcher_maps_exact_gradient_steps_to_hydra():
+    shared = PROGRESS_TRAIN_SCRIPT.read_text()
+    vast = VAST_PROGRESS_TRAIN_SCRIPT.read_text()
+
+    assert 'NUM_GRAD_STEPS="${NUM_GRAD_STEPS:-}"' in shared
+    assert 'HYDRA_OVERRIDES+=("training.num_grad_steps=${NUM_GRAD_STEPS}")' in shared
+    assert 'GRADIENT_ACCUMULATE_EVERY="${GRADIENT_ACCUMULATE_EVERY:-1}"' in shared
+    assert '"training.gradient_accumulate_every=${GRADIENT_ACCUMULATE_EVERY}"' in shared
+    assert 'VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-${BATCH_SIZE}}"' in shared
+    assert 'bash "${TRAIN_LAUNCHER}" "$@"' in vast
 
 
 def test_vast_setup_wrapper_uses_persistent_volume_defaults(tmp_path):

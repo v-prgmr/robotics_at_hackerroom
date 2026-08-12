@@ -179,3 +179,24 @@ def test_optimizer_step_changes_only_progress_head_and_has_nonzero_head_gradient
     optimizer.step()
     for name, before in frozen_before.items():
         torch.testing.assert_close(dict(policy.named_parameters())[name], before, rtol=0, atol=0)
+
+
+def test_sample_weighted_accumulation_matches_concatenated_batch():
+    parameter_accumulated = nn.Parameter(torch.tensor([0.25]))
+    parameter_combined = nn.Parameter(parameter_accumulated.detach().clone())
+    microbatches = [
+        torch.tensor([0.0, 1.0]),
+        torch.tensor([0.2, 0.4, 0.8]),
+    ]
+
+    total_valid = 0
+    for target in microbatches:
+        loss = (parameter_accumulated - target).square().mean()
+        (loss * len(target)).backward()
+        total_valid += len(target)
+    parameter_accumulated.grad.div_(total_valid)
+
+    combined = torch.cat(microbatches)
+    (parameter_combined - combined).square().mean().backward()
+
+    torch.testing.assert_close(parameter_accumulated.grad, parameter_combined.grad)

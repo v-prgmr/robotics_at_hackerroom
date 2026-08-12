@@ -102,6 +102,8 @@ training:
   split_seed: 42
   val_ratio: 0.1
   num_epochs: 100
+  num_grad_steps: null
+  gradient_accumulate_every: 1
   use_ema: true
   val_every: 1
   checkpoint_every: 1

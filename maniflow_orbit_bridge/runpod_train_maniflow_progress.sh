@@ -24,8 +24,11 @@ RUN_NAME="${RUN_NAME:-maniflow_progress_phase1a}"
 OUTPUT_DIR="${OUTPUT_DIR:-${WORKSPACE_DIR}/outputs/train/${RUN_NAME}}"
 GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
+VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-${BATCH_SIZE}}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 NUM_EPOCHS="${NUM_EPOCHS:-100}"
+NUM_GRAD_STEPS="${NUM_GRAD_STEPS:-}"
+GRADIENT_ACCUMULATE_EVERY="${GRADIENT_ACCUMULATE_EVERY:-1}"
 LEARNING_RATE="${LEARNING_RATE:-1.0e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1.0e-3}"
 PROGRESS_HIDDEN_DIM="${PROGRESS_HIDDEN_DIM:-512}"
@@ -61,6 +64,17 @@ if [[ ! -d "${MANIFLOW_DIR}/maniflow" ]]; then
     echo "ManiFlow checkout not found: ${MANIFLOW_DIR}"
     exit 1
 fi
+for integer_setting in \
+    "BATCH_SIZE=${BATCH_SIZE}" \
+    "VAL_BATCH_SIZE=${VAL_BATCH_SIZE}" \
+    "GRADIENT_ACCUMULATE_EVERY=${GRADIENT_ACCUMULATE_EVERY}"; do
+    setting_name="${integer_setting%%=*}"
+    setting_value="${integer_setting#*=}"
+    if [[ ! "${setting_value}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "${setting_name} must be a positive integer, got: ${setting_value}"
+        exit 1
+    fi
+done
 
 SOURCE_CHECKPOINT="$(readlink -f "${SOURCE_CHECKPOINT}")"
 DATASET_ZARR="$(readlink -f "${DATASET_ZARR}")"
@@ -148,12 +162,13 @@ HYDRA_OVERRIDES=(
     "hydra.run.dir=${OUTPUT_DIR}"
     "training.device=${GPU_DEVICE}"
     "training.num_epochs=${NUM_EPOCHS}"
+    "training.gradient_accumulate_every=${GRADIENT_ACCUMULATE_EVERY}"
     "training.split_seed=${SPLIT_SEED}"
     "training.val_ratio=${VAL_RATIO}"
     "training.val_every=${VAL_EVERY}"
     "training.checkpoint_every=${CHECKPOINT_EVERY}"
     "dataloader.batch_size=${BATCH_SIZE}"
-    "val_dataloader.batch_size=${BATCH_SIZE}"
+    "val_dataloader.batch_size=${VAL_BATCH_SIZE}"
     "dataloader.num_workers=${NUM_WORKERS}"
     "val_dataloader.num_workers=${NUM_WORKERS}"
     "optimizer.lr=${LEARNING_RATE}"
@@ -162,6 +177,13 @@ HYDRA_OVERRIDES=(
     "logging.mode=${LOGGING_MODE}"
 )
 
+if [[ -n "${NUM_GRAD_STEPS}" ]]; then
+    if [[ ! "${NUM_GRAD_STEPS}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "NUM_GRAD_STEPS must be a positive integer, got: ${NUM_GRAD_STEPS}"
+        exit 1
+    fi
+    HYDRA_OVERRIDES+=("training.num_grad_steps=${NUM_GRAD_STEPS}")
+fi
 if [[ -n "${MAX_TRAIN_STEPS}" ]]; then
     HYDRA_OVERRIDES+=("training.max_train_steps=${MAX_TRAIN_STEPS}")
 fi
@@ -174,6 +196,13 @@ echo "  checkpoint: ${SOURCE_CHECKPOINT} [${SOURCE_STATE_KEY}]"
 echo "  dataset:    ${DATASET_ZARR}"
 echo "  output:     ${OUTPUT_DIR}"
 echo "  device:     ${GPU_DEVICE}"
+echo "  batches:    train=${BATCH_SIZE}, val=${VAL_BATCH_SIZE}, accumulation=${GRADIENT_ACCUMULATE_EVERY}"
+echo "  effective:  $((BATCH_SIZE * GRADIENT_ACCUMULATE_EVERY)) samples (before any short final batch)"
+if [[ -n "${NUM_GRAD_STEPS}" ]]; then
+    echo "  run length: ${NUM_GRAD_STEPS} optimizer steps"
+else
+    echo "  run length: ${NUM_EPOCHS} epochs"
+fi
 
 cd "${MANIFLOW_DIR}/maniflow/workspace"
 python train_maniflow_progress_workspace.py \

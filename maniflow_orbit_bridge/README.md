@@ -907,6 +907,7 @@ optionally destroy the instance only after the training process exits successful
 SOURCE_CHECKPOINT=/workspace/checkpoints/trained_maniflow.ckpt \
 DATASET_ZARR=/workspace/dataset/teabags_kitting_full_topreward_maniflow.zarr \
 RUN_NAME=maniflow_progress_phase1a \
+NUM_GRAD_STEPS=10000 \
 bash maniflow_orbit_bridge/vast_train_maniflow_progress.sh
 ```
 
@@ -939,9 +940,11 @@ export SOURCE_STATE_KEY=ema_model
 export RUN_NAME=maniflow_progress_phase1a
 export OUTPUT_DIR=/workspace/outputs/train/${RUN_NAME}
 export GPU_DEVICE=cuda:0
-export BATCH_SIZE=32
+export BATCH_SIZE=64
+export VAL_BATCH_SIZE=32
+export GRADIENT_ACCUMULATE_EVERY=2
 export NUM_WORKERS=4
-export NUM_EPOCHS=100
+export NUM_GRAD_STEPS=10000
 export LEARNING_RATE=1.0e-4
 export WEIGHT_DECAY=1.0e-3
 export PROGRESS_HIDDEN_DIM=512
@@ -953,15 +956,29 @@ export LOGGING_MODE=online
 export WANDB_API_KEY=your-key
 ```
 
+`NUM_GRAD_STEPS` is the recommended run-length control for this probe. It counts successful
+`optimizer.step()` calls, not dataloader batches: a batch with zero valid progress targets does not
+advance it. When set, it overrides `NUM_EPOCHS` as the stopping criterion and the final partial epoch
+still runs validation and saves the last checkpoint. If `NUM_GRAD_STEPS` is unset, training retains
+the epoch-based `NUM_EPOCHS` behavior.
+
+`BATCH_SIZE` is the training microbatch size and `GRADIENT_ACCUMULATE_EVERY` controls how many valid
+microbatches form one optimizer update. For example, `BATCH_SIZE=64` and
+`GRADIENT_ACCUMULATE_EVERY=2` give an effective training batch of 128, while
+`VAL_BATCH_SIZE=32` keeps validation at batch 32. Accumulation is weighted by the number of valid
+samples, so a short microbatch has the same gradient as computing MSE over the concatenated effective
+batch. Invalid microbatches do not advance the accumulation window or `NUM_GRAD_STEPS`.
+
 For a short smoke run:
 
 ```bash
 SOURCE_CHECKPOINT=/absolute/path/to/trained_maniflow.ckpt \
 DATASET_ZARR=/absolute/path/to/progress-enabled.zarr \
-NUM_EPOCHS=1 \
+NUM_GRAD_STEPS=2 \
 BATCH_SIZE=2 \
+VAL_BATCH_SIZE=2 \
+GRADIENT_ACCUMULATE_EVERY=2 \
 NUM_WORKERS=0 \
-MAX_TRAIN_STEPS=2 \
 MAX_VAL_STEPS=2 \
 LOGGING_MODE=disabled \
 bash maniflow_orbit_bridge/runpod_train_maniflow_progress.sh

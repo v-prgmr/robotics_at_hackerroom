@@ -38,6 +38,14 @@ def _episode_ids(batch, batch_size):
     return [str(value) for value in episode_id]
 
 
+def _divide_gradients(parameters, divisor):
+    if divisor <= 0:
+        raise ValueError("Gradient divisor must be positive")
+    for parameter in parameters:
+        if parameter.grad is not None:
+            parameter.grad.div_(divisor)
+
+
 @torch.no_grad()
 def evaluate_progress(policy, dataloader, device, max_steps=None):
     policy.eval()
@@ -86,7 +94,7 @@ def evaluate_progress(policy, dataloader, device, max_steps=None):
 
 
 class TrainManiFlowProgressWorkspace(BaseWorkspace):
-    include_keys = ("global_step", "epoch")
+    include_keys = ("global_step", "optimizer_step", "epoch")
 
     def __init__(self, cfg, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
@@ -101,14 +109,17 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
         unexpected = [name for name, parameter in trainable.items() if parameter.requires_grad and not name.startswith("progress_head.")]
         if unexpected:
             raise RuntimeError(f"Only progress_head may be trainable, got: {unexpected}")
-        head_parameters = [parameter for name, parameter in trainable.items() if name.startswith("progress_head.")]
-        if not head_parameters or not all(parameter.requires_grad for parameter in head_parameters):
+        self.head_parameters = [
+            parameter for name, parameter in trainable.items() if name.startswith("progress_head.")
+        ]
+        if not self.head_parameters or not all(parameter.requires_grad for parameter in self.head_parameters):
             raise RuntimeError("Every progress_head parameter must be trainable")
-        self.optimizer = hydra.utils.instantiate(cfg.optimizer, params=head_parameters)
+        self.optimizer = hydra.utils.instantiate(cfg.optimizer, params=self.head_parameters)
 
         self.ema_model = copy.deepcopy(self.model) if cfg.training.use_ema else None
         self.ema = hydra.utils.instantiate(cfg.ema, model=self.ema_model) if self.ema_model else None
         self.global_step = 0
+        self.optimizer_step = 0
         self.epoch = 0
 
     def run(self):
@@ -135,7 +146,24 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
             **cfg.logging,
         )
 
-        for _ in range(cfg.training.num_epochs):
+        num_grad_steps = cfg.training.num_grad_steps
+        if num_grad_steps is not None:
+            num_grad_steps = int(num_grad_steps)
+            if num_grad_steps <= 0:
+                raise ValueError("training.num_grad_steps must be positive when configured")
+        gradient_accumulate_every = int(cfg.training.gradient_accumulate_every)
+        if gradient_accumulate_every <= 0:
+            raise ValueError("training.gradient_accumulate_every must be positive")
+
+        def training_complete():
+            if num_grad_steps is not None:
+                return self.optimizer_step >= num_grad_steps
+            return self.epoch >= int(cfg.training.num_epochs)
+
+        accumulation_microbatches = 0
+        accumulation_valid_count = 0
+        self.optimizer.zero_grad(set_to_none=True)
+        while not training_complete():
             self.model.train()
             train_loss_sum = 0.0
             train_valid_count = 0
@@ -143,26 +171,52 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
                 batch = _to_device(batch, device)
                 loss, loss_dict = self.model.compute_loss(batch)
                 valid_count = int(loss_dict["progress_valid_count"])
-                self.optimizer.zero_grad(set_to_none=True)
                 if valid_count:
-                    loss.backward()
-                    self.optimizer.step()
-                    if self.ema is not None:
-                        self.ema.step(self.model)
+                    (loss * valid_count).backward()
+                    accumulation_microbatches += 1
+                    accumulation_valid_count += valid_count
+                    if accumulation_microbatches == gradient_accumulate_every:
+                        _divide_gradients(self.head_parameters, accumulation_valid_count)
+                        self.optimizer.step()
+                        self.optimizer.zero_grad(set_to_none=True)
+                        self.optimizer_step += 1
+                        accumulation_microbatches = 0
+                        accumulation_valid_count = 0
+                        if self.ema is not None:
+                            self.ema.step(self.model)
                 train_loss_sum += float(loss.item()) * valid_count
                 train_valid_count += valid_count
                 self.global_step += 1
+                if training_complete():
+                    break
                 if cfg.training.max_train_steps is not None and batch_index + 1 >= cfg.training.max_train_steps:
                     break
 
+            if train_valid_count == 0:
+                raise RuntimeError("Training epoch contained zero valid progress targets")
             self.epoch += 1
+            final_epoch = num_grad_steps is None and self.epoch >= int(cfg.training.num_epochs)
+            if final_epoch and accumulation_microbatches:
+                _divide_gradients(self.head_parameters, accumulation_valid_count)
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
+                self.optimizer_step += 1
+                accumulation_microbatches = 0
+                accumulation_valid_count = 0
+                if self.ema is not None:
+                    self.ema.step(self.model)
             log = {
                 "epoch": self.epoch,
                 "global_step": self.global_step,
+                "optimizer_step": self.optimizer_step,
+                "gradient_accumulate_every": gradient_accumulate_every,
+                "pending_accumulation_microbatches": accumulation_microbatches,
                 "train_progress_mse": train_loss_sum / train_valid_count if train_valid_count else 0.0,
                 "train_progress_valid_count": train_valid_count,
             }
-            if self.epoch % cfg.training.val_every == 0:
+            final_step = training_complete()
+            accumulation_complete = accumulation_microbatches == 0
+            if accumulation_complete and (self.epoch % cfg.training.val_every == 0 or final_step):
                 policy = self.ema_model if self.ema_model is not None else self.model
                 metrics, per_episode = evaluate_progress(
                     policy, val_dataloader, device, cfg.training.max_val_steps
@@ -177,7 +231,9 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
                     path = topk.get_ckpt_path(metrics | {"epoch": self.epoch})
                     if path is not None:
                         self.save_checkpoint(path=path, use_thread=False)
-            if cfg.checkpoint.save_last_ckpt and self.epoch % cfg.training.checkpoint_every == 0:
+            if accumulation_complete and cfg.checkpoint.save_last_ckpt and (
+                self.epoch % cfg.training.checkpoint_every == 0 or final_step
+            ):
                 self.save_checkpoint(use_thread=False)
             run.log(log, step=self.global_step)
 
