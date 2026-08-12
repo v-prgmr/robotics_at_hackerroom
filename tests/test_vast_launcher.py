@@ -67,6 +67,7 @@ def test_progress_launcher_maps_exact_gradient_steps_to_hydra():
     assert 'realpath --canonicalize-missing --no-symlinks "${SOURCE_CHECKPOINT}"' in shared
     assert '"source_checkpoint=\'${SOURCE_CHECKPOINT}\'"' in shared
     assert 'export PYTHONPATH="${MANIFLOW_DIR}${PYTHONPATH:+:${PYTHONPATH}}"' in shared
+    assert '"logging.name=\'${RUN_NAME}\'"' in shared
     assert 'bash "${TRAIN_LAUNCHER}" "$@"' in vast
 
 

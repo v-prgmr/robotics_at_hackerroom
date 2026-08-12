@@ -176,6 +176,7 @@ HYDRA_OVERRIDES=(
     "optimizer.weight_decay=${WEIGHT_DECAY}"
     "policy.progress_hidden_dim=${PROGRESS_HIDDEN_DIM}"
     "logging.mode=${LOGGING_MODE}"
+    "logging.name='${RUN_NAME}'"
 )
 
 if [[ -n "${NUM_GRAD_STEPS}" ]]; then

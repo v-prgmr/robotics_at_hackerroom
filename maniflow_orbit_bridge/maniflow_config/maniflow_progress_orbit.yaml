@@ -113,7 +113,7 @@ training:
 logging:
   project: ManiFlow_Orbit
   group: progress_phase_1a
-  name: ${training.seed}
+  name: ${name}
   mode: online
   resume: false
   tags: [orbit_so100, progress_value, phase_1a]
