@@ -989,6 +989,11 @@ Additional arguments are forwarded as Hydra overrides, for example
 active environment, checkpoint state key, required zarr arrays, and availability of at least two
 progress-supervised episodes when validation is enabled.
 
+Checkpoint paths may contain Hydra-special characters such as `=`. The launcher quotes path overrides
+and preserves the pathname of symbolic links, so a safe symlink such as
+`/workspace/checkpoints/maniflow_epoch100.ckpt` can point to an original checkpoint named
+`epoch=0100-val_loss=0.060680.ckpt` without copying the file.
+
 Only `progress_head.*` is optimized. The observation encoder, ViT/CLIP modules, DiT-X action model,
 and T5 encoder remain frozen and in evaluation mode. Validation uses complete held-out supervised
 episodes and selects checkpoints by `val_progress_mse`.

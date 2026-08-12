@@ -76,7 +76,7 @@ for integer_setting in \
     fi
 done
 
-SOURCE_CHECKPOINT="$(readlink -f "${SOURCE_CHECKPOINT}")"
+SOURCE_CHECKPOINT="$(realpath --canonicalize-missing --no-symlinks "${SOURCE_CHECKPOINT}")"
 DATASET_ZARR="$(readlink -f "${DATASET_ZARR}")"
 OUTPUT_DIR="$(mkdir -p "${OUTPUT_DIR}" && readlink -f "${OUTPUT_DIR}")"
 
@@ -156,10 +156,10 @@ python "${ORBIT_DIR}/maniflow_orbit_bridge/install_into_maniflow.py" \
     --overwrite
 
 HYDRA_OVERRIDES=(
-    "source_checkpoint=${SOURCE_CHECKPOINT}"
-    "source_state_key=${SOURCE_STATE_KEY}"
-    "progress_dataset.zarr_path=${DATASET_ZARR}"
-    "hydra.run.dir=${OUTPUT_DIR}"
+    "source_checkpoint='${SOURCE_CHECKPOINT}'"
+    "source_state_key='${SOURCE_STATE_KEY}'"
+    "progress_dataset.zarr_path='${DATASET_ZARR}'"
+    "hydra.run.dir='${OUTPUT_DIR}'"
     "training.device=${GPU_DEVICE}"
     "training.num_epochs=${NUM_EPOCHS}"
     "training.gradient_accumulate_every=${GRADIENT_ACCUMULATE_EVERY}"
