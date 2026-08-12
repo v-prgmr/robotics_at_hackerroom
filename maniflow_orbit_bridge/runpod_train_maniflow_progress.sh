@@ -79,6 +79,7 @@ done
 SOURCE_CHECKPOINT="$(realpath --canonicalize-missing --no-symlinks "${SOURCE_CHECKPOINT}")"
 DATASET_ZARR="$(readlink -f "${DATASET_ZARR}")"
 OUTPUT_DIR="$(mkdir -p "${OUTPUT_DIR}" && readlink -f "${OUTPUT_DIR}")"
+export PYTHONPATH="${MANIFLOW_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 if ! command -v conda >/dev/null 2>&1 && [[ -x "${MINICONDA_DIR}/bin/conda" ]]; then
     export PATH="${MINICONDA_DIR}/bin:${PATH}"

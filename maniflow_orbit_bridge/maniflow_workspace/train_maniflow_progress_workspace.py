@@ -19,6 +19,9 @@ from maniflow.model.diffusion.ema_model import EMAModel
 from maniflow.workspace.base_workspace import BaseWorkspace
 
 
+OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+
 def _to_device(value, device):
     if isinstance(value, dict):
         return {key: _to_device(item, device) for key, item in value.items()}

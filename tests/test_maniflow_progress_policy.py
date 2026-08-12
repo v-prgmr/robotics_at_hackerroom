@@ -10,6 +10,16 @@ nn = torch.nn
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "maniflow"))
 
 
+def test_progress_workspace_registers_eval_resolver_before_hydra_entrypoint():
+    workspace = (
+        pathlib.Path(__file__).parents[1]
+        / "maniflow_orbit_bridge/maniflow_workspace/train_maniflow_progress_workspace.py"
+    ).read_text()
+
+    assert 'OmegaConf.register_new_resolver("eval", eval, replace=True)' in workspace
+    assert workspace.index("OmegaConf.register_new_resolver") < workspace.index("@hydra.main")
+
+
 class TopRewardManiFlowTransformerImagePolicy(nn.Module):
     pass
 
