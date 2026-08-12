@@ -9,6 +9,7 @@ from collections import defaultdict
 import hydra
 import numpy as np
 import torch
+import tqdm
 import wandb
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
@@ -165,80 +166,117 @@ class TrainManiFlowProgressWorkspace(BaseWorkspace):
 
         accumulation_microbatches = 0
         accumulation_valid_count = 0
+        accumulation_loss_sum = 0.0
         self.optimizer.zero_grad(set_to_none=True)
-        while not training_complete():
-            self.model.train()
-            train_loss_sum = 0.0
-            train_valid_count = 0
-            for batch_index, batch in enumerate(train_dataloader):
-                batch = _to_device(batch, device)
-                loss, loss_dict = self.model.compute_loss(batch)
-                valid_count = int(loss_dict["progress_valid_count"])
-                if valid_count:
-                    (loss * valid_count).backward()
-                    accumulation_microbatches += 1
-                    accumulation_valid_count += valid_count
-                    if accumulation_microbatches == gradient_accumulate_every:
-                        _divide_gradients(self.head_parameters, accumulation_valid_count)
-                        self.optimizer.step()
-                        self.optimizer.zero_grad(set_to_none=True)
-                        self.optimizer_step += 1
-                        accumulation_microbatches = 0
-                        accumulation_valid_count = 0
-                        if self.ema is not None:
-                            self.ema.step(self.model)
-                train_loss_sum += float(loss.item()) * valid_count
-                train_valid_count += valid_count
-                self.global_step += 1
-                if training_complete():
-                    break
-                if cfg.training.max_train_steps is not None and batch_index + 1 >= cfg.training.max_train_steps:
-                    break
+        progress_total = num_grad_steps
+        progress = tqdm.tqdm(
+            total=progress_total,
+            initial=self.optimizer_step if progress_total is not None else 0,
+            desc="Progress optimizer steps",
+            unit="step",
+            dynamic_ncols=True,
+        )
+        try:
+            while not training_complete():
+                self.model.train()
+                train_loss_sum = 0.0
+                train_valid_count = 0
+                for batch_index, batch in enumerate(train_dataloader):
+                    batch = _to_device(batch, device)
+                    loss, loss_dict = self.model.compute_loss(batch)
+                    valid_count = int(loss_dict["progress_valid_count"])
+                    optimizer_stepped = False
+                    step_loss_sum = 0.0
+                    if valid_count:
+                        step_loss_sum = float(loss.item()) * valid_count
+                        (loss * valid_count).backward()
+                        accumulation_microbatches += 1
+                        accumulation_valid_count += valid_count
+                        accumulation_loss_sum += step_loss_sum
+                        if accumulation_microbatches == gradient_accumulate_every:
+                            accumulated_mse = accumulation_loss_sum / accumulation_valid_count
+                            _divide_gradients(self.head_parameters, accumulation_valid_count)
+                            self.optimizer.step()
+                            self.optimizer.zero_grad(set_to_none=True)
+                            self.optimizer_step += 1
+                            optimizer_stepped = True
+                            accumulation_microbatches = 0
+                            accumulation_valid_count = 0
+                            accumulation_loss_sum = 0.0
+                            if self.ema is not None:
+                                self.ema.step(self.model)
+                            progress.update(1)
+                            progress.set_postfix(
+                                loss=f"{accumulated_mse:.6f}",
+                                epoch=self.epoch,
+                                microbatch=self.global_step + 1,
+                            )
+                            run.log(
+                                {
+                                    "train_progress_mse_step": accumulated_mse,
+                                    "train_progress_valid_count_step": train_valid_count + valid_count,
+                                    "optimizer_step": self.optimizer_step,
+                                    "global_step": self.global_step + 1,
+                                    "epoch": self.epoch,
+                                },
+                                step=self.optimizer_step,
+                            )
+                    train_loss_sum += step_loss_sum
+                    train_valid_count += valid_count
+                    self.global_step += 1
+                    if training_complete():
+                        break
+                    if cfg.training.max_train_steps is not None and batch_index + 1 >= cfg.training.max_train_steps:
+                        break
 
-            if train_valid_count == 0:
-                raise RuntimeError("Training epoch contained zero valid progress targets")
-            self.epoch += 1
-            final_epoch = num_grad_steps is None and self.epoch >= int(cfg.training.num_epochs)
-            if final_epoch and accumulation_microbatches:
-                _divide_gradients(self.head_parameters, accumulation_valid_count)
-                self.optimizer.step()
-                self.optimizer.zero_grad(set_to_none=True)
-                self.optimizer_step += 1
-                accumulation_microbatches = 0
-                accumulation_valid_count = 0
-                if self.ema is not None:
-                    self.ema.step(self.model)
-            log = {
-                "epoch": self.epoch,
-                "global_step": self.global_step,
-                "optimizer_step": self.optimizer_step,
-                "gradient_accumulate_every": gradient_accumulate_every,
-                "pending_accumulation_microbatches": accumulation_microbatches,
-                "train_progress_mse": train_loss_sum / train_valid_count if train_valid_count else 0.0,
-                "train_progress_valid_count": train_valid_count,
-            }
-            final_step = training_complete()
-            accumulation_complete = accumulation_microbatches == 0
-            if accumulation_complete and (self.epoch % cfg.training.val_every == 0 or final_step):
-                policy = self.ema_model if self.ema_model is not None else self.model
-                metrics, per_episode = evaluate_progress(
-                    policy, val_dataloader, device, cfg.training.max_val_steps
-                )
-                if metrics is None:
-                    print("Validation contained zero valid progress targets; skipping best checkpoint")
-                else:
-                    log.update(metrics)
-                    log["val_progress_episode_mse"] = wandb.Table(
-                        columns=["episode_id", "mse"], data=sorted(per_episode.items())
+                if train_valid_count == 0:
+                    raise RuntimeError("Training epoch contained zero valid progress targets")
+                self.epoch += 1
+                final_epoch = num_grad_steps is None and self.epoch >= int(cfg.training.num_epochs)
+                if final_epoch and accumulation_microbatches:
+                    _divide_gradients(self.head_parameters, accumulation_valid_count)
+                    self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self.optimizer_step += 1
+                    accumulation_microbatches = 0
+                    accumulation_valid_count = 0
+                    accumulation_loss_sum = 0.0
+                    if self.ema is not None:
+                        self.ema.step(self.model)
+                    progress.update(1)
+                log = {
+                    "epoch": self.epoch,
+                    "global_step": self.global_step,
+                    "optimizer_step": self.optimizer_step,
+                    "gradient_accumulate_every": gradient_accumulate_every,
+                    "pending_accumulation_microbatches": accumulation_microbatches,
+                    "train_progress_mse": train_loss_sum / train_valid_count,
+                    "train_progress_valid_count": train_valid_count,
+                }
+                final_step = training_complete()
+                accumulation_complete = accumulation_microbatches == 0
+                if accumulation_complete and (self.epoch % cfg.training.val_every == 0 or final_step):
+                    policy = self.ema_model if self.ema_model is not None else self.model
+                    metrics, per_episode = evaluate_progress(
+                        policy, val_dataloader, device, cfg.training.max_val_steps
                     )
-                    path = topk.get_ckpt_path(metrics | {"epoch": self.epoch})
-                    if path is not None:
-                        self.save_checkpoint(path=path, use_thread=False)
-            if accumulation_complete and cfg.checkpoint.save_last_ckpt and (
-                self.epoch % cfg.training.checkpoint_every == 0 or final_step
-            ):
-                self.save_checkpoint(use_thread=False)
-            run.log(log, step=self.global_step)
+                    if metrics is None:
+                        print("Validation contained zero valid progress targets; skipping best checkpoint")
+                    else:
+                        log.update(metrics)
+                        log["val_progress_episode_mse"] = wandb.Table(
+                            columns=["episode_id", "mse"], data=sorted(per_episode.items())
+                        )
+                        path = topk.get_ckpt_path(metrics | {"epoch": self.epoch})
+                        if path is not None:
+                            self.save_checkpoint(path=path, use_thread=False)
+                if accumulation_complete and cfg.checkpoint.save_last_ckpt and (
+                    self.epoch % cfg.training.checkpoint_every == 0 or final_step
+                ):
+                    self.save_checkpoint(use_thread=False)
+                run.log(log, step=self.optimizer_step)
+        finally:
+            progress.close()
 
 
 _CONFIG_ROOT = pathlib.Path(__file__).parent.parent

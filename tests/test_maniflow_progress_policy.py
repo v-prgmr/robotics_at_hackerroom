@@ -20,6 +20,17 @@ def test_progress_workspace_registers_eval_resolver_before_hydra_entrypoint():
     assert workspace.index("OmegaConf.register_new_resolver") < workspace.index("@hydra.main")
 
 
+def test_progress_workspace_reports_optimizer_step_progress():
+    workspace = (
+        pathlib.Path(__file__).parents[1]
+        / "maniflow_orbit_bridge/maniflow_workspace/train_maniflow_progress_workspace.py"
+    ).read_text()
+
+    assert 'desc="Progress optimizer steps"' in workspace
+    assert '"train_progress_mse_step": accumulated_mse' in workspace
+    assert "step=self.optimizer_step" in workspace
+
+
 class TopRewardManiFlowTransformerImagePolicy(nn.Module):
     pass
 
