@@ -20,7 +20,38 @@ This bridge is intentionally separate from the Orbit package. Orbit records/expo
 
 ## Environment
 
-Use ManiFlow's own conda environment. Do not install ManiFlow into Orbit's `uv` environment because the dependency pins differ.
+Use ManiFlow's dedicated environment. Do not install ManiFlow into Orbit's root `uv` environment because the dependency pins differ. The recommended setup is the locked project in `maniflow_orbit_bridge/uv_training`; the existing Conda setup remains available for compatibility.
+
+### Locked uv setup
+
+The lock targets Python 3.10, PyTorch 2.4.1, torchvision 0.19.1, and CUDA 12.4. It also pins model-structure-sensitive packages such as `timm`, Transformers, and PEFT so dense, LoRA/RaC, and progress-head checkpoints can be resumed with the same runtime.
+
+On a persistent RunPod or Vast volume:
+
+```bash
+export WORKSPACE_DIR=/workspace
+export MANIFLOW_ENV_MANAGER=uv
+export UV_PROJECT_ENVIRONMENT=/workspace/venvs/maniflow-training
+export UV_CACHE_DIR=/workspace/uv-cache
+bash maniflow_orbit_bridge/runpod_setup_maniflow_env.sh
+```
+
+The setup script installs `uv` when necessary, syncs from `uv_training/uv.lock`, checks out the pinned upstream ManiFlow revision, installs it editable without resolving extra dependencies, and installs the Orbit bridge. Both training launchers use the persistent environment when `MANIFLOW_ENV_MANAGER=uv`:
+
+```bash
+MANIFLOW_ENV_MANAGER=uv \
+    bash maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh
+
+MANIFLOW_ENV_MANAGER=uv \
+SOURCE_CHECKPOINT=/workspace/checkpoints/base.ckpt \
+RESUME_CHECKPOINT=/workspace/outputs/train/progress/checkpoints/latest.ckpt \
+DATASET_ZARR=/workspace/dataset/progress.zarr \
+    bash maniflow_orbit_bridge/runpod_train_maniflow_progress.sh
+```
+
+For a progress resume, keep `PROGRESS_HIDDEN_DIM`, source model/config, dataset split settings, and the lock unchanged. `RESUME_CHECKPOINT` restores the model, EMA model, AdamW optimizer, EMA helper, epoch, and optimizer-step counters. `SOURCE_CHECKPOINT` is still required to validate the frozen backbone configuration.
+
+To intentionally use the legacy environment instead, set `MANIFLOW_ENV_MANAGER=conda`. That remains the default for the shared RunPod scripts; the Vast wrappers default to `uv`.
 
 On RunPod with `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`, run the setup script from this repo after cloning it to `/workspace/orbit`:
 
@@ -77,11 +108,12 @@ git clone <your-orbit-repository-url> orbit
 cd /data/orbit
 git switch topreward-maniflow-training
 
+export WORKSPACE_DIR=/data
 bash maniflow_orbit_bridge/vast_setup_maniflow_env.sh
 ```
 
 The wrapper reuses the provider-neutral parts of the RunPod setup while defaulting the repository,
-ManiFlow checkout, conda environment, Hugging Face cache, datasets, and outputs to `/data`. Its
+ManiFlow checkout, locked uv environment, uv cache, Hugging Face cache, datasets, and outputs to `/data`. Its
 PyTorch 2.4.1/CUDA 12.4 environment supports RTX 4090; do not use this setup for RTX 5090.
 
 Configure a TOPReward run:

@@ -17,6 +17,15 @@ set -euo pipefail
 #   cd /workspace/orbit
 #   bash maniflow_orbit_bridge/runpod_setup_maniflow_env.sh
 
+MANIFLOW_ENV_MANAGER="${MANIFLOW_ENV_MANAGER:-conda}"
+if [[ "${MANIFLOW_ENV_MANAGER}" == "uv" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    exec bash "${SCRIPT_DIR}/setup_maniflow_uv_env.sh"
+elif [[ "${MANIFLOW_ENV_MANAGER}" != "conda" ]]; then
+    echo "MANIFLOW_ENV_MANAGER must be 'conda' or 'uv', got: ${MANIFLOW_ENV_MANAGER}"
+    exit 1
+fi
+
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 ORBIT_DIR="${ORBIT_DIR:-${WORKSPACE_DIR}/orbit}"
 MANIFLOW_DIR="${MANIFLOW_DIR:-${WORKSPACE_DIR}/maniflow}"

@@ -48,6 +48,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-${WORKSPACE_DIR}/outputs/train/${RUN_NAME}}"
 CONDA_ENV="${CONDA_ENV:-maniflow}"
 CONDA_ENV_DIR="${CONDA_ENV_DIR:-${WORKSPACE_DIR}/conda_envs/${CONDA_ENV}}"
 MINICONDA_DIR="${MINICONDA_DIR:-${WORKSPACE_DIR}/miniconda3}"
+MANIFLOW_ENV_MANAGER="${MANIFLOW_ENV_MANAGER:-conda}"
+UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-${WORKSPACE_DIR}/venvs/maniflow-training}"
 GPU_DEVICE="${GPU_DEVICE:-}"
 BATCH_SIZE="${BATCH_SIZE:-}"
 NUM_WORKERS="${NUM_WORKERS:-}"
@@ -96,11 +98,20 @@ if [[ ! -d "${MANIFLOW_DIR}" ]]; then
     git clone https://github.com/allenai/maniflow.git "${MANIFLOW_DIR}"
 fi
 
-if ! command -v conda >/dev/null 2>&1 && [[ -x "${MINICONDA_DIR}/bin/conda" ]]; then
+if [[ "${MANIFLOW_ENV_MANAGER}" == "uv" ]]; then
+    if [[ ! -x "${UV_PROJECT_ENVIRONMENT}/bin/python" ]]; then
+        echo "uv environment not found at ${UV_PROJECT_ENVIRONMENT}. Run setup with MANIFLOW_ENV_MANAGER=uv first."
+        exit 1
+    fi
+    export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
+elif [[ "${MANIFLOW_ENV_MANAGER}" != "conda" ]]; then
+    echo "MANIFLOW_ENV_MANAGER must be 'conda' or 'uv', got: ${MANIFLOW_ENV_MANAGER}"
+    exit 1
+elif ! command -v conda >/dev/null 2>&1 && [[ -x "${MINICONDA_DIR}/bin/conda" ]]; then
     export PATH="${MINICONDA_DIR}/bin:${PATH}"
 fi
 
-if command -v conda >/dev/null 2>&1; then
+if [[ "${MANIFLOW_ENV_MANAGER}" == "conda" ]] && command -v conda >/dev/null 2>&1; then
     # Some Conda package hooks read optional backup variables while switching envs.
     set +u
     # shellcheck disable=SC1091
@@ -114,7 +125,7 @@ if command -v conda >/dev/null 2>&1; then
         exit 1
     fi
     set -u
-else
+elif [[ "${MANIFLOW_ENV_MANAGER}" == "conda" ]]; then
     echo "conda not found; continuing with current Python environment."
 fi
 

@@ -55,6 +55,27 @@ def test_vast_wrappers_default_to_workspace_volume():
     assert expected in VAST_PROGRESS_TRAIN_SCRIPT.read_text()
 
 
+def test_vast_wrappers_default_to_persistent_uv_environment():
+    for script in (SETUP_SCRIPT, TRAIN_SCRIPT, VAST_PROGRESS_TRAIN_SCRIPT):
+        text = script.read_text()
+        assert 'MANIFLOW_ENV_MANAGER="${MANIFLOW_ENV_MANAGER:-uv}"' in text
+        assert 'UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-${WORKSPACE_DIR}/venvs/maniflow-training}"' in text
+        assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-${WORKSPACE_DIR}/uv-cache}"' in text
+
+
+def test_shared_launchers_support_locked_uv_environment():
+    setup = (ROOT / "maniflow_orbit_bridge/runpod_setup_maniflow_env.sh").read_text()
+    policy = (ROOT / "maniflow_orbit_bridge/runpod_train_maniflow_orbit.sh").read_text()
+    progress = PROGRESS_TRAIN_SCRIPT.read_text()
+
+    assert 'MANIFLOW_ENV_MANAGER="${MANIFLOW_ENV_MANAGER:-conda}"' in setup
+    assert 'exec bash "${SCRIPT_DIR}/setup_maniflow_uv_env.sh"' in setup
+    for launcher in (policy, progress):
+        assert 'MANIFLOW_ENV_MANAGER="${MANIFLOW_ENV_MANAGER:-conda}"' in launcher
+        assert 'export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"' in launcher
+        assert "MANIFLOW_ENV_MANAGER must be 'conda' or 'uv'" in launcher
+
+
 def test_progress_launcher_maps_exact_gradient_steps_to_hydra():
     shared = PROGRESS_TRAIN_SCRIPT.read_text()
     vast = VAST_PROGRESS_TRAIN_SCRIPT.read_text()
