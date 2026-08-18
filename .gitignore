@@ -26,6 +26,8 @@ trial_dataset_*/
 /openpi/
 /maniflow/
 /ManiFlow_Policy/
+/external/le-wm/
+/external/stable-worldmodel/
 
 .DS_Store
 

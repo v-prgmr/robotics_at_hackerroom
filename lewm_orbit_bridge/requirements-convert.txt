@@ -1,0 +1,6 @@
+lancedb>=0.26
+matplotlib>=3.8
+opencv-python-headless>=4.9
+pandas>=2.1
+pillow>=10
+pyarrow>=15
