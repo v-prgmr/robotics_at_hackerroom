@@ -40,6 +40,10 @@ def _git_sha(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def _metric_stage(stage: str) -> str:
+    return {"fit": "train", "validate": "val"}.get(stage, stage)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -135,6 +139,7 @@ def main(argv: list[str] | None = None) -> None:
     short_run_losses = []
 
     def forward(self, batch, stage):
+        metric_stage = _metric_stage(stage)
         batch["action"] = torch.nan_to_num(batch["action"], 0.0)
         output = self.model.encode(batch)
         embeddings = output["emb"]
@@ -147,9 +152,13 @@ def main(argv: list[str] | None = None) -> None:
         output["loss"] = output["pred_loss"] + float(cfg.loss.sigreg.weight) * output["sigreg_loss"]
         if not torch.isfinite(output["loss"]):
             raise FloatingPointError(f"Non-finite {stage} loss")
-        if stage == "train" and args.mode in {"smoke", "tiny-overfit"}:
+        if metric_stage == "train" and args.mode in {"smoke", "tiny-overfit"}:
             short_run_losses.append(float(output["pred_loss"].detach().cpu()))
-        self.log_dict({f"{stage}/{key}": value for key, value in output.items() if "loss" in key}, on_step=True, on_epoch=True)
+        self.log_dict(
+            {f"{metric_stage}/{key}": value for key, value in output.items() if "loss" in key},
+            on_step=True,
+            on_epoch=True,
+        )
         return output
 
     model = hydra.utils.instantiate(cfg.model)
@@ -258,9 +267,17 @@ def main(argv: list[str] | None = None) -> None:
     manager()
     if not trainer.is_global_zero:
         return
-    if not checkpoint.best_model_path:
-        raise RuntimeError("Training completed without a validation-selected checkpoint")
-    best_payload = torch.load(checkpoint.best_model_path, map_location="cpu", weights_only=False)
+    selected_checkpoint = checkpoint.best_model_path
+    checkpoint_selection = "validation"
+    if not selected_checkpoint:
+        if args.mode == "full":
+            raise RuntimeError("Training completed without a validation-selected checkpoint")
+        fallback_checkpoint = output_dir / "checkpoints" / "short-run-final.ckpt"
+        fallback_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        trainer.save_checkpoint(str(fallback_checkpoint))
+        selected_checkpoint = str(fallback_checkpoint)
+        checkpoint_selection = "final-step"
+    best_payload = torch.load(selected_checkpoint, map_location="cpu", weights_only=False)
     module.load_state_dict(best_payload["state_dict"], strict=True)
     torch.save(module.model, output_dir / "lewm_object.ckpt")
     torch.save(module.model.state_dict(), output_dir / "lewm_weights.pt")
@@ -289,7 +306,8 @@ def main(argv: list[str] | None = None) -> None:
         "val_clips": len(val_clip_indices),
         "peak_gpu_memory_bytes": int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else 0,
         "checkpoint_saved": (output_dir / "lewm_object.ckpt").exists(),
-        "selected_checkpoint": checkpoint.best_model_path,
+        "selected_checkpoint": selected_checkpoint,
+        "checkpoint_selection": checkpoint_selection,
         "selected_val_prediction_loss": float(checkpoint.best_model_score) if checkpoint.best_model_score is not None else None,
         "initial_prediction_loss": initial_prediction_loss,
         "final_prediction_loss": final_prediction_loss,
@@ -308,7 +326,8 @@ def main(argv: list[str] | None = None) -> None:
             "action_normalization_sha256": file_sha256(output_dir / "action_normalization.json"),
             "checkpoint_sha256": file_sha256(output_dir / "lewm_object.ckpt"),
             "dataset_statistics_sha256": file_sha256(output_dir / "dataset_statistics.json"),
-            "selected_checkpoint": checkpoint.best_model_path,
+            "selected_checkpoint": selected_checkpoint,
+            "checkpoint_selection": checkpoint_selection,
             "huggingface": {
                 **hf_config.public_metadata(),
                 "actual_private": hf_callback.uploader.actual_private if hf_callback.uploader else None,

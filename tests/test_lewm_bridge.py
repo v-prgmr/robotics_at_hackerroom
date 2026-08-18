@@ -210,3 +210,11 @@ def test_training_config_requires_explicit_dataset_paths_and_uses_spt_manager():
     assert "~/.stable-wm" not in config
     assert "manager = spt.Manager(" in trainer
     assert "manager()" in trainer
+
+
+def test_training_metric_stages_match_checkpoint_namespace():
+    from lewm_orbit_bridge.train_lewm import _metric_stage
+
+    assert _metric_stage("fit") == "train"
+    assert _metric_stage("validate") == "val"
+    assert _metric_stage("test") == "test"
