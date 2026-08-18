@@ -57,12 +57,12 @@ The bridge supports the following custom environment variables. Paths may be abs
 | `LEWM_VENV` | `$ORBIT_DIR/.venv-lewm` | Setup | Python 3.10 virtual environment created by `uv` |
 | `LEWM_PYTHON` | `$ORBIT_DIR/.venv-lewm/bin/python` | Train and eval launchers | Python executable used after setup |
 | `LEWM_CONFIG` | `$ORBIT_DIR/lewm_orbit_bridge/config/teabag.yaml` | Train and eval launchers | LeWM experiment configuration |
-| `LEWM_DATASET` | `$STABLEWM_HOME/datasets/teabag.lance` | Hydra config | Converted Lance dataset path |
-| `LEWM_SPLITS` | `$STABLEWM_HOME/datasets/teabag.splits.json` | Hydra config | Exact episode-level split manifest |
+| `LEWM_DATASET` | No default; required | Hydra config | Converted Lance dataset path |
+| `LEWM_SPLITS` | No default; required | Hydra config | Exact episode-level split manifest |
 | `LEWM_OUTPUT_DIR` | `outputs/lewm/teabag_overhead_fs3_v1` | Hydra config | Current run's checkpoints, metadata, curves, and evaluation outputs |
 | `LEWM_CHECKPOINT` | No default; required for eval | Eval launcher | Trained `lewm_object.ckpt` selected by validation loss |
 | `LEWM_RESUME_CHECKPOINT` | No default | Training | Full-state Lightning checkpoint used to restore model, optimizer, scheduler, epoch, and step |
-| `STABLEWM_HOME` | `~/.stable-wm` | Hydra config and Stable World Model | Fallback storage root when `LEWM_DATASET` or `LEWM_SPLITS` is unset |
+| `STABLEWM_HOME` | `~/.stable-wm` | Stable World Model | Optional upstream cache root; it does not replace required `LEWM_DATASET` and `LEWM_SPLITS` values |
 | `HF_UPLOAD_ENABLED` | `false` | Training | Enable periodic recovery and final run uploads to Hugging Face Hub |
 | `HF_REPO_ID` | No default; required when enabled | Training | Target Hugging Face model repository, for example `org/teabag-lewm` |
 | `HF_TOKEN` | Falls back to `HUGGING_FACE_HUB_TOKEN` | Training | Hugging Face write token; never persisted in run artifacts |

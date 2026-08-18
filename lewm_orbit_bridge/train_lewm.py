@@ -248,12 +248,14 @@ def main(argv: list[str] | None = None) -> None:
         num_sanity_val_steps=1,
         enable_checkpointing=True,
     )
-    trainer.fit(
-        module,
-        train_dataloaders=train_loader,
-        val_dataloaders=val_loader,
-        ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
+    data_module = spt.data.DataModule(train=train_loader, val=val_loader)
+    manager = spt.Manager(
+        trainer=trainer,
+        module=module,
+        data=data_module,
+        ckpt_path=resume_checkpoint,
     )
+    manager()
     if not trainer.is_global_zero:
         return
     if not checkpoint.best_model_path:

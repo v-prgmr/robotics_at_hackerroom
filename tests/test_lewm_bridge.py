@@ -198,3 +198,15 @@ def test_train_launcher_uses_package_module_from_any_working_directory(tmp_path)
     lines = result.stdout.splitlines()
     assert lines[0] == f"{repo_root}:/existing/pythonpath"
     assert lines[1:3] == ["-m", "lewm_orbit_bridge.train_lewm"]
+
+
+def test_training_config_requires_explicit_dataset_paths_and_uses_spt_manager():
+    repo_root = Path(__file__).resolve().parents[1]
+    config = (repo_root / "lewm_orbit_bridge/config/teabag.yaml").read_text()
+    trainer = (repo_root / "lewm_orbit_bridge/train_lewm.py").read_text()
+
+    assert "dataset_path: ${oc.env:LEWM_DATASET}" in config
+    assert "split_manifest: ${oc.env:LEWM_SPLITS}" in config
+    assert "~/.stable-wm" not in config
+    assert "manager = spt.Manager(" in trainer
+    assert "manager()" in trainer

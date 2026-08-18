@@ -1,7 +1,7 @@
 experiment_name: teabag_overhead_fs3_v1
 seed: 3072
-dataset_path: ${oc.env:LEWM_DATASET,${oc.env:STABLEWM_HOME,~/.stable-wm}/datasets/teabag.lance}
-split_manifest: ${oc.env:LEWM_SPLITS,${oc.env:STABLEWM_HOME,~/.stable-wm}/datasets/teabag.splits.json}
+dataset_path: ${oc.env:LEWM_DATASET}
+split_manifest: ${oc.env:LEWM_SPLITS}
 output_dir: ${oc.env:LEWM_OUTPUT_DIR,outputs/lewm/teabag_overhead_fs3_v1}
 lewm_root: ${oc.env:LEWM_ROOT,external/le-wm}
 
