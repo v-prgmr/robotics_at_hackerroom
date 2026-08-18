@@ -61,7 +61,16 @@ The bridge supports the following custom environment variables. Paths may be abs
 | `LEWM_SPLITS` | `$STABLEWM_HOME/datasets/teabag.splits.json` | Hydra config | Exact episode-level split manifest |
 | `LEWM_OUTPUT_DIR` | `outputs/lewm/teabag_overhead_fs3_v1` | Hydra config | Current run's checkpoints, metadata, curves, and evaluation outputs |
 | `LEWM_CHECKPOINT` | No default; required for eval | Eval launcher | Trained `lewm_object.ckpt` selected by validation loss |
+| `LEWM_RESUME_CHECKPOINT` | No default | Training | Full-state Lightning checkpoint used to restore model, optimizer, scheduler, epoch, and step |
 | `STABLEWM_HOME` | `~/.stable-wm` | Hydra config and Stable World Model | Fallback storage root when `LEWM_DATASET` or `LEWM_SPLITS` is unset |
+| `HF_UPLOAD_ENABLED` | `false` | Training | Enable periodic recovery and final run uploads to Hugging Face Hub |
+| `HF_REPO_ID` | No default; required when enabled | Training | Target Hugging Face model repository, for example `org/teabag-lewm` |
+| `HF_TOKEN` | Falls back to `HUGGING_FACE_HUB_TOKEN` | Training | Hugging Face write token; never persisted in run artifacts |
+| `HF_PRIVATE` | `true` | Training | Create the target model repository as private when it does not exist |
+| `HF_CHECKPOINT_INTERVAL_EPOCHS` | `5` | Training | Periodic full-state upload cadence; `0` means final upload only |
+| `HF_REMOTE_PREFIX` | `runs/$experiment_name` | Training | Path inside the model repository for this run |
+| `HF_UPLOAD_RETRIES` | `3` | Training | Attempts for each Hub upload operation |
+| `HF_UPLOAD_RETRY_DELAY_S` | `10` | Training | Delay between failed Hub upload attempts |
 
 If `LEWM_VENV` is customized, also set `LEWM_PYTHON` because the train and evaluation launchers do not derive one variable from the other:
 
@@ -97,7 +106,7 @@ mkdir -p "$(dirname "$LEWM_DATASET")"
 
 ## Step 2: Install the Environment
 
-The setup script clones both pinned upstream repositories, checks out exact detached commits, creates the Python 3.10 environment, installs Stable World Model and conversion dependencies, and performs import checks:
+The setup script clones both pinned upstream repositories, checks out exact detached commits, creates the Python 3.10 environment, installs Stable World Model's training dependencies and the conversion dependencies, and performs import checks. Simulation environment extras are intentionally omitted because this experiment does not use online Gymnasium environments:
 
 ```bash
 bash lewm_orbit_bridge/setup_lewm.sh
@@ -112,6 +121,8 @@ git -C "$STABLEWM_ROOT" rev-parse HEAD
 ```
 
 Expected revisions are listed under [Pinned Sources](#pinned-sources). Do not continue if imports fail or the revisions differ.
+
+Warnings that optional environments such as ALE are unavailable are expected and do not affect Lance conversion, LeWM training, or latent evaluation.
 
 ## Step 3: Verify Source Datasets
 
@@ -235,10 +246,16 @@ split episodes
 
 ## Step 8: Launch the Full Experiment
 
-Select the final output directory and launch the configured 100 epochs:
+Select the final output directory. To enable private Hugging Face uploads, configure the repository, token, and desired periodic checkpoint interval before launching:
 
 ```bash
 export LEWM_OUTPUT_DIR=/workspace/outputs/lewm/teabag_overhead_fs3_v1
+export HF_UPLOAD_ENABLED=true
+export HF_REPO_ID=your-org/teabag-lewm
+export HF_TOKEN=hf_your_write_token
+export HF_PRIVATE=true
+export HF_CHECKPOINT_INTERVAL_EPOCHS=5
+export HF_REMOTE_PREFIX=runs/teabag_overhead_fs3_v1
 
 bash lewm_orbit_bridge/train_teabag_lewm.sh \
   --mode full \
@@ -248,7 +265,7 @@ bash lewm_orbit_bridge/train_teabag_lewm.sh \
 
 Defaults come from `lewm_orbit_bridge/config/teabag.yaml`: BF16 mixed precision, AdamW, learning rate `5e-5`, weight decay `1e-3`, image size 224, embedding dimension 192, history size 3, one predicted transition, frameskip 3, and SIGReg weight `0.09`. The ViT starts from random weights.
 
-Known command-line options are `--mode`, `--max-steps`, `--batch-size`, and `--num-workers`. Additional arguments are interpreted as OmegaConf dot-list overrides. Examples:
+Known command-line options are `--mode`, `--max-steps`, `--batch-size`, `--num-workers`, and `--resume-checkpoint`. Additional arguments are interpreted as OmegaConf dot-list overrides. Examples:
 
 ```bash
 bash lewm_orbit_bridge/train_teabag_lewm.sh --mode full loader.batch_size=64
@@ -256,6 +273,15 @@ bash lewm_orbit_bridge/train_teabag_lewm.sh --mode full trainer.max_epochs=10 wa
 ```
 
 Prefer `--batch-size` over `loader.batch_size=...` when only changing batch size.
+
+Local `checkpoints/last.ckpt` and validation-selected `checkpoints/best.ckpt` are updated every epoch. When HF upload is enabled, `HF_CHECKPOINT_INTERVAL_EPOCHS=N` additionally uploads resumable recovery files every `N` epochs:
+
+```text
+$HF_REMOTE_PREFIX/recovery/last.ckpt
+$HF_REMOTE_PREFIX/recovery/best.ckpt
+```
+
+`last.ckpt` contains optimizer and scheduler state and is the checkpoint to use for resuming. Setting the interval to `0` disables periodic network uploads but still uploads the complete run after successful training. Periodic upload failures are retried and then reported as warnings so a temporary network outage does not discard the training run; a failed final upload exits with an error while leaving all local artifacts intact.
 
 The selected output directory contains:
 
@@ -272,6 +298,40 @@ splits.json                     exact train/validation/test episode IDs
 training_curves/                CSV metrics
 full_summary.json               run summary and peak GPU memory
 ```
+
+After successful training, the entire output directory is uploaded under `HF_REMOTE_PREFIX`, including the validation-selected object and weights checkpoints, available Lightning recovery checkpoints, resolved configuration, split manifest, train-only normalization, dataset statistics, hashes, summaries, and CSV curves. Use a unique prefix for each independent run so files from an older run cannot remain under the same Hub path.
+
+## Resume After Instance Loss
+
+Download the remote recovery and historical best checkpoints on the replacement instance. Use the same absolute `LEWM_OUTPUT_DIR`, dataset, split manifest, and configuration as the original run:
+
+```bash
+mkdir -p "$LEWM_OUTPUT_DIR/recovery" "$LEWM_OUTPUT_DIR/checkpoints"
+
+hf download "$HF_REPO_ID" \
+  "$HF_REMOTE_PREFIX/recovery/last.ckpt" \
+  --repo-type model \
+  --token "$HF_TOKEN" \
+  --local-dir /workspace/hf-recovery
+
+export LEWM_RESUME_CHECKPOINT="/workspace/hf-recovery/$HF_REMOTE_PREFIX/recovery/last.ckpt"
+
+hf download "$HF_REPO_ID" \
+  "$HF_REMOTE_PREFIX/recovery/best.ckpt" \
+  --repo-type model \
+  --token "$HF_TOKEN" \
+  --local-dir /workspace/hf-recovery
+
+cp "/workspace/hf-recovery/$HF_REMOTE_PREFIX/recovery/best.ckpt" \
+  "$LEWM_OUTPUT_DIR/checkpoints/best.ckpt"
+
+bash lewm_orbit_bridge/train_teabag_lewm.sh \
+  --mode full \
+  --batch-size 32 \
+  --num-workers 6
+```
+
+You can use `--resume-checkpoint /path/to/last.ckpt` instead of `LEWM_RESUME_CHECKPOINT`. The trainer verifies hashes for the resolved config, split manifest, action normalization, and dataset manifest before accepting a checkpoint. Do not resume from `lewm_object.ckpt` or `lewm_weights.pt`; those files do not contain optimizer, scheduler, epoch, or global-step state.
 
 ## Step 9: Evaluate the Held-Out Test Set
 
@@ -338,6 +398,8 @@ $LEWM_OUTPUT_DIR/goal_structure/
 | Unexpected upstream commit | Rerun `setup_lewm.sh`; the converter rejects unpinned LeWM or Stable World Model revisions |
 | Parquet nested-list read errors under system Python | Use `$LEWM_PYTHON`, not an unrelated Python installation |
 | Tiny-overfit loss does not fall by 20% | Stop and debug alignment, normalization, or data loading before full training |
+| Periodic HF upload warning | Training continues after retries; verify network/token and let the final upload retry, or upload the local output directory manually |
+| Resume checkpoint missing | Download `$HF_REMOTE_PREFIX/recovery/last.ckpt` and set `LEWM_RESUME_CHECKPOINT` to the resulting local file |
 
 ## Go/No-Go Order
 

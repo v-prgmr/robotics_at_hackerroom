@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +9,7 @@ import pytest
 
 from lewm_orbit_bridge.common import episode_indices_for_split, stratified_episode_split
 from lewm_orbit_bridge.convert_orbit_to_lewm import discover_episodes, load_episode_arrays
+from lewm_orbit_bridge.hf_upload import HuggingFaceRunUploader, HuggingFaceUploadConfig
 
 
 def test_stratified_split_is_reproducible_disjoint_and_complete():
@@ -98,3 +101,72 @@ def test_episode_conversion_preserves_duplicate_frames_and_left_right_action_ord
     assert stats["action_alignment"] == "same_row_action"
     assert stats["duplicate_video_frame_fraction"] == pytest.approx(1 / 3)
     assert stats["frame_age_exceeds_command_duration_count"] == 3
+
+
+def test_hf_upload_config_is_private_and_periodic_without_exposing_token():
+    config = HuggingFaceUploadConfig.from_environment(
+        "teabag_overhead_fs3_v1",
+        {
+            "HF_UPLOAD_ENABLED": "true",
+            "HF_REPO_ID": "example/orbit-lewm",
+            "HF_TOKEN": "secret-token",
+            "HF_CHECKPOINT_INTERVAL_EPOCHS": "7",
+        },
+    )
+
+    assert config.private is True
+    assert config.should_upload_checkpoint(7)
+    assert config.should_upload_checkpoint(14)
+    assert not config.should_upload_checkpoint(6)
+    assert "secret-token" not in repr(config)
+    assert "token" not in config.public_metadata()
+
+
+def test_hf_upload_interval_zero_disables_periodic_but_keeps_final_upload_enabled():
+    config = HuggingFaceUploadConfig.from_environment(
+        "run",
+        {
+            "HF_UPLOAD_ENABLED": "true",
+            "HF_REPO_ID": "example/orbit-lewm",
+            "HUGGING_FACE_HUB_TOKEN": "secret-token",
+            "HF_CHECKPOINT_INTERVAL_EPOCHS": "0",
+        },
+    )
+
+    assert config.enabled
+    assert not config.should_upload_checkpoint(1)
+    assert not config.should_upload_checkpoint(100)
+
+
+def test_hf_upload_enabled_requires_repo_and_token():
+    with pytest.raises(ValueError, match="HF_REPO_ID"):
+        HuggingFaceUploadConfig.from_environment("run", {"HF_UPLOAD_ENABLED": "true"})
+
+    with pytest.raises(ValueError, match="HF_TOKEN"):
+        HuggingFaceUploadConfig.from_environment(
+            "run", {"HF_UPLOAD_ENABLED": "true", "HF_REPO_ID": "example/orbit-lewm"}
+        )
+
+
+def test_hf_private_upload_refuses_existing_public_repo(monkeypatch):
+    class FakeApi:
+        def __init__(self, token):
+            pass
+
+        def repo_info(self, **kwargs):
+            return types.SimpleNamespace(private=False)
+
+    fake_module = types.SimpleNamespace(HfApi=FakeApi, create_repo=lambda *args, **kwargs: None)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_module)
+    config = HuggingFaceUploadConfig.from_environment(
+        "run",
+        {
+            "HF_UPLOAD_ENABLED": "true",
+            "HF_REPO_ID": "example/public-repo",
+            "HF_TOKEN": "secret-token",
+            "HF_UPLOAD_RETRY_DELAY_S": "0",
+        },
+    )
+
+    with pytest.raises(ValueError, match="is public"):
+        HuggingFaceRunUploader(config)
