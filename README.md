@@ -10,6 +10,10 @@ This repository is a `uv` project named `orbit` and pins Python to `3.10` becaus
 uv sync --extra test
 ```
 
+## Experimental LeWorldModel
+
+The isolated LeWorldModel experiment, complete environment-variable reference, Orbit-to-Lance conversion procedure, smoke tests, full training launch, and held-out evaluation commands are documented in [`lewm_orbit_bridge/README.md`](lewm_orbit_bridge/README.md).
+
 ## List Hardware
 
 ```bash

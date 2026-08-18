@@ -28,71 +28,203 @@ Stable World Model applies `frameskip=3` while loading and groups all three raw 
 
 HIL/RaC `success=true` means the correction clip was saved. It is never interpreted as full-task success.
 
-## Setup
+## Prerequisites
+
+- Linux with `git` and [`uv`](https://docs.astral.sh/uv/) available on `PATH`
+- Python 3.10, installed automatically by `uv` when needed
+- An NVIDIA GPU with BF16 support for the configured training run
+- Orbit intermediate-format source datasets with `episode-*/timesteps.parquet`, `episode_metadata.json`, and `videos/overhead.mp4`
+- Enough storage for the source videos, the converted Lance dataset, checkpoints, and plots
+
+Run every command below from the Orbit repository root. The launchers compute `ORBIT_DIR` automatically, but setting it explicitly makes copied commands unambiguous:
+
+```bash
+cd /workspace/orbit
+export ORBIT_DIR="$(pwd)"
+```
+
+## Environment Variables
+
+The bridge supports the following custom environment variables. Paths may be absolute or relative to the current working directory, but absolute paths are recommended for remote training machines.
+
+| Variable | Default | Used by | Purpose |
+| --- | --- | --- | --- |
+| `ORBIT_DIR` | Repository root inferred from the launcher | Setup, train, eval | Orbit checkout containing `lewm_orbit_bridge/` |
+| `LEWM_ROOT` | `$ORBIT_DIR/external/le-wm` | Setup, config, train, eval | Unmodified LeWM checkout |
+| `LEWM_SHA` | `8edfeb336732b5f3ce7b8b210d0ba370a09e2cac` | Setup | LeWM commit checked out in detached mode |
+| `STABLEWM_ROOT` | `$ORBIT_DIR/external/stable-worldmodel` | Setup and conversion CLI | Stable World Model checkout providing Lance support |
+| `STABLEWM_SHA` | `9a66d7d020043c8efb507f45373e808714f0842d` | Setup | Stable World Model commit checked out in detached mode |
+| `LEWM_VENV` | `$ORBIT_DIR/.venv-lewm` | Setup | Python 3.10 virtual environment created by `uv` |
+| `LEWM_PYTHON` | `$ORBIT_DIR/.venv-lewm/bin/python` | Train and eval launchers | Python executable used after setup |
+| `LEWM_CONFIG` | `$ORBIT_DIR/lewm_orbit_bridge/config/teabag.yaml` | Train and eval launchers | LeWM experiment configuration |
+| `LEWM_DATASET` | `$STABLEWM_HOME/datasets/teabag.lance` | Hydra config | Converted Lance dataset path |
+| `LEWM_SPLITS` | `$STABLEWM_HOME/datasets/teabag.splits.json` | Hydra config | Exact episode-level split manifest |
+| `LEWM_OUTPUT_DIR` | `outputs/lewm/teabag_overhead_fs3_v1` | Hydra config | Current run's checkpoints, metadata, curves, and evaluation outputs |
+| `LEWM_CHECKPOINT` | No default; required for eval | Eval launcher | Trained `lewm_object.ckpt` selected by validation loss |
+| `STABLEWM_HOME` | `~/.stable-wm` | Hydra config and Stable World Model | Fallback storage root when `LEWM_DATASET` or `LEWM_SPLITS` is unset |
+
+If `LEWM_VENV` is customized, also set `LEWM_PYTHON` because the train and evaluation launchers do not derive one variable from the other:
+
+```bash
+export LEWM_VENV=/workspace/venvs/lewm
+export LEWM_PYTHON="$LEWM_VENV/bin/python"
+```
+
+`LEWM_SHA` and `STABLEWM_SHA` are exposed for setup reproducibility, but the converter intentionally requires the pinned revisions listed above. Updating either revision requires updating and revalidating the bridge's corresponding pin check.
+
+Optional Weights & Biases logging uses standard W&B variables such as `WANDB_API_KEY`, `WANDB_ENTITY`, and `WANDB_MODE`. It remains disabled unless training is launched with `wandb.enabled=true`.
+
+## Step 1: Configure Paths
+
+Choose persistent locations for the converted data and experiment outputs. This example keeps external repositories and the Python environment under Orbit while placing large artifacts under `/workspace`:
+
+```bash
+export LEWM_ROOT="$ORBIT_DIR/external/le-wm"
+export STABLEWM_ROOT="$ORBIT_DIR/external/stable-worldmodel"
+export LEWM_VENV="$ORBIT_DIR/.venv-lewm"
+export LEWM_PYTHON="$LEWM_VENV/bin/python"
+export LEWM_CONFIG="$ORBIT_DIR/lewm_orbit_bridge/config/teabag.yaml"
+
+export LEWM_DATASET=/workspace/lewm_data/teabag.lance
+export LEWM_SPLITS=/workspace/lewm_data/teabag.splits.json
+```
+
+Create only the parent directory. The converter creates the Lance table itself:
+
+```bash
+mkdir -p "$(dirname "$LEWM_DATASET")"
+```
+
+## Step 2: Install the Environment
+
+The setup script clones both pinned upstream repositories, checks out exact detached commits, creates the Python 3.10 environment, installs Stable World Model and conversion dependencies, and performs import checks:
 
 ```bash
 bash lewm_orbit_bridge/setup_lewm.sh
 ```
 
-Override locations with `LEWM_ROOT`, `STABLEWM_ROOT`, or `LEWM_VENV`. The scripts default to `external/le-wm`, `external/stable-worldmodel`, and `.venv-lewm`.
-
-## Convert and Split
-
-Collection type can be explicit with `TYPE=/path`. Explicit types are recommended so no path-name inference is involved.
+Verify the environment, revisions, and GPU visibility:
 
 ```bash
-.venv-lewm/bin/python -m lewm_orbit_bridge.convert_orbit_to_lewm \
-  --dataset expert=/workspace/orbit/dataset/teabags_kitting_50_v2 \
-  --dataset policy_success=/workspace/orbit/dataset/maniflow_rollouts/successes \
-  --dataset policy_failure=/workspace/orbit/dataset/maniflow_rollouts/failures \
-  --dataset hil/rac_correction=/workspace/orbit/dataset/maniflow_hil_bounded \
-  --output /workspace/lewm_data/teabag.lance \
+"$LEWM_PYTHON" -c 'import lancedb, stable_pretraining, stable_worldmodel, torch; print("torch", torch.__version__); print("cuda", torch.cuda.is_available()); print("bf16", torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False)'
+git -C "$LEWM_ROOT" rev-parse HEAD
+git -C "$STABLEWM_ROOT" rev-parse HEAD
+```
+
+Expected revisions are listed under [Pinned Sources](#pinned-sources). Do not continue if imports fail or the revisions differ.
+
+## Step 3: Verify Source Datasets
+
+Set or inspect the four source roots before conversion:
+
+```bash
+test -d "$ORBIT_DIR/dataset/teabags_kitting_50_v2"
+test -d "$ORBIT_DIR/dataset/maniflow_rollouts/successes"
+test -d "$ORBIT_DIR/dataset/maniflow_rollouts/failures"
+test -d "$ORBIT_DIR/dataset/maniflow_hil_bounded"
+```
+
+Use explicit `COLLECTION_TYPE=/path` arguments. This avoids relying on directory-name inference and preserves the intended provenance labels.
+
+## Step 4: Convert and Split
+
+Run the converter with the dedicated Python environment:
+
+```bash
+"$LEWM_PYTHON" -m lewm_orbit_bridge.convert_orbit_to_lewm \
+  --dataset "expert=$ORBIT_DIR/dataset/teabags_kitting_50_v2" \
+  --dataset "policy_success=$ORBIT_DIR/dataset/maniflow_rollouts/successes" \
+  --dataset "policy_failure=$ORBIT_DIR/dataset/maniflow_rollouts/failures" \
+  --dataset "hil/rac_correction=$ORBIT_DIR/dataset/maniflow_hil_bounded" \
+  --output "$LEWM_DATASET" \
+  --splits-output "$LEWM_SPLITS" \
+  --lewm-root "$LEWM_ROOT" \
+  --stablewm-root "$STABLEWM_ROOT" \
   --seed 3072 \
   --overwrite
 ```
 
-The converter creates:
+The converter writes one episode-contiguous Lance dataset plus reproducibility sidecars:
 
 ```text
-teabag.lance/
-teabag.splits.json
-teabag.manifest.json
+/workspace/lewm_data/teabag.lance/
+/workspace/lewm_data/teabag.splits.json
+/workspace/lewm_data/teabag.manifest.json
 ```
 
-The 80/10/10 train/validation/test split is episode-level, reproducible, and stratified by collection type where category size permits. Exact stable episode UIDs are persisted. Test episodes are not used for training, model selection, normalization, or successful-goal construction.
+The split is 80% train, 10% validation, and 10% test at episode level, stratified by collection type where counts permit. The test episode IDs are never used for training, normalization, model selection, or successful-goal construction. `--overwrite` replaces a previous conversion; omit it when accidental replacement should fail.
 
-## Validate Alignment
+Inspect the generated manifest before continuing:
 
 ```bash
-.venv-lewm/bin/python -m lewm_orbit_bridge.validate_lewm_dataset \
-  /workspace/lewm_data/teabag.lance \
+"$LEWM_PYTHON" -c 'import json, os; p=os.environ["LEWM_DATASET"].removesuffix(".lance") + ".manifest.json"; d=json.load(open(p)); print(json.dumps({k:d[k] for k in ("num_episodes", "num_timesteps", "action_dim", "collection_type_counts", "split_counts", "frameskip")}, indent=2))'
+```
+
+Confirm that `action_dim` is 12 and review the collection and split counts.
+
+## Step 5: Validate Action/Frame Alignment
+
+Run strict validation and generate a transition contact sheet:
+
+```bash
+"$LEWM_PYTHON" -m lewm_orbit_bridge.validate_lewm_dataset \
+  "$LEWM_DATASET" \
   --report /workspace/lewm_data/teabag.validation.json \
-  --visual-sample /workspace/lewm_data/teabag.transitions.png
+  --visual-sample /workspace/lewm_data/teabag.transitions.png \
+  --sample-count 8 \
+  --seed 3072
 ```
 
-Inspect `teabag.transitions.png` before training. It shows `observation_t`, the exact accepted `action_t`, and `observation_t+1`.
+Validation must exit successfully. Manually inspect `/workspace/lewm_data/teabag.transitions.png`; each row shows `observation_t`, the exact accepted `action_t`, and `observation_t+1`. Also inspect the conversion manifest's `camera_timing_diagnostic`. It is diagnostic metadata, not a reason to shift actions between recorder rows.
 
-## Configure Paths
+Do not start GPU training until validation passes and the contact sheet looks plausible.
 
-The defaults in `config/teabag.yaml` can be overridden without editing YAML:
+## Step 6: Run the Training Smoke Test
+
+Use a separate output directory so smoke artifacts cannot be mistaken for the full run:
 
 ```bash
-export LEWM_DATASET=/workspace/lewm_data/teabag.lance
-export LEWM_SPLITS=/workspace/lewm_data/teabag.splits.json
-export LEWM_OUTPUT_DIR=/workspace/outputs/lewm/teabag_overhead_fs3_v1
-export LEWM_ROOT=/workspace/orbit/external/le-wm
+export LEWM_OUTPUT_DIR=/workspace/outputs/lewm/teabag_overhead_fs3_smoke
+
+bash lewm_orbit_bridge/train_teabag_lewm.sh \
+  --mode smoke \
+  --max-steps 50 \
+  --batch-size 32 \
+  --num-workers 6
 ```
 
-## Smoke and Tiny Overfit
+Inspect the smoke summary:
 
 ```bash
-bash lewm_orbit_bridge/train_teabag_lewm.sh --mode smoke --max-steps 50
-bash lewm_orbit_bridge/train_teabag_lewm.sh --mode tiny-overfit --max-steps 400
+"$LEWM_PYTHON" -m json.tool "$LEWM_OUTPUT_DIR/smoke_summary.json"
+test -f "$LEWM_OUTPUT_DIR/lewm_object.ckpt"
 ```
 
-Smoke mode checks finite forward/backward losses, optimizer stepping, checkpoint export, and peak GPU allocation. Tiny-overfit mode uses two training episodes and fails unless final prediction loss is at least 20% below initial prediction loss.
+The run must complete forward and backward passes, report finite initial/final prediction losses, take optimizer steps, save a checkpoint, and report stable peak GPU allocation. If GPU memory is insufficient, retry with `--batch-size 16` or `--batch-size 8`.
 
-Training order is deliberately leak-free:
+## Step 7: Overfit Two Episodes
+
+Use another isolated output directory:
+
+```bash
+export LEWM_OUTPUT_DIR=/workspace/outputs/lewm/teabag_overhead_fs3_tiny_overfit
+
+bash lewm_orbit_bridge/train_teabag_lewm.sh \
+  --mode tiny-overfit \
+  --max-steps 400 \
+  --batch-size 32 \
+  --num-workers 6
+```
+
+Inspect the result:
+
+```bash
+"$LEWM_PYTHON" -m json.tool "$LEWM_OUTPUT_DIR/tiny-overfit_summary.json"
+```
+
+The command fails intentionally if final prediction loss is not at least 20% below initial prediction loss. Do not launch the 100-epoch run until this test succeeds.
+
+Training is leak-free in every mode:
 
 ```text
 split episodes
@@ -101,38 +233,111 @@ split episodes
     -> train
 ```
 
-## Full Training
+## Step 8: Launch the Full Experiment
+
+Select the final output directory and launch the configured 100 epochs:
 
 ```bash
-bash lewm_orbit_bridge/train_teabag_lewm.sh --mode full
+export LEWM_OUTPUT_DIR=/workspace/outputs/lewm/teabag_overhead_fs3_v1
+
+bash lewm_orbit_bridge/train_teabag_lewm.sh \
+  --mode full \
+  --batch-size 32 \
+  --num-workers 6
 ```
 
-Defaults are 100 epochs, batch 32, BF16 mixed precision, AdamW, learning rate `5e-5`, weight decay `1e-3`, image size 224, embedding dimension 192, history 3, one-step prediction, and SIGReg weight `0.09`. The ViT is initialized from scratch.
+Defaults come from `lewm_orbit_bridge/config/teabag.yaml`: BF16 mixed precision, AdamW, learning rate `5e-5`, weight decay `1e-3`, image size 224, embedding dimension 192, history size 3, one predicted transition, frameskip 3, and SIGReg weight `0.09`. The ViT starts from random weights.
 
-Outputs include the resolved config, train-only action statistics, exact splits, Orbit/LeWM SHAs, Lightning checkpoints, object/weights exports, CSV curves, and mode summaries.
-
-## Held-Out Evaluation
+Known command-line options are `--mode`, `--max-steps`, `--batch-size`, and `--num-workers`. Additional arguments are interpreted as OmegaConf dot-list overrides. Examples:
 
 ```bash
+bash lewm_orbit_bridge/train_teabag_lewm.sh --mode full loader.batch_size=64
+bash lewm_orbit_bridge/train_teabag_lewm.sh --mode full trainer.max_epochs=10 wandb.enabled=true wandb.project=orbit-lewm
+```
+
+Prefer `--batch-size` over `loader.batch_size=...` when only changing batch size.
+
+The selected output directory contains:
+
+```text
+action_normalization.json       train-only action statistics
+checkpoints/                    Lightning best and last checkpoints
+dataset_statistics.json         copied conversion manifest
+git_versions.json               Orbit and LeWM revisions
+lewm_object.ckpt                validation-selected model for evaluation
+lewm_weights.pt                 validation-selected state dict
+resolved_config.yaml            exact resolved training configuration
+run_manifest.json               artifact hashes and selected checkpoint
+splits.json                     exact train/validation/test episode IDs
+training_curves/                CSV metrics
+full_summary.json               run summary and peak GPU memory
+```
+
+## Step 9: Evaluate the Held-Out Test Set
+
+Evaluation verifies hashes in `run_manifest.json`, so `LEWM_OUTPUT_DIR` and `LEWM_CHECKPOINT` must refer to the same full run:
+
+```bash
+export LEWM_OUTPUT_DIR=/workspace/outputs/lewm/teabag_overhead_fs3_v1
 export LEWM_CHECKPOINT="$LEWM_OUTPUT_DIR/lewm_object.ckpt"
+
 bash lewm_orbit_bridge/eval_teabag_lewm.sh
 ```
 
-Latent prediction reports 1/3/5/10-transition MSE and cosine similarity on test episodes. It compares:
+The wrapper runs both held-out evaluations with default settings. It intentionally accepts no extra arguments. For custom latent horizons or window counts, invoke the evaluator directly:
 
-1. LeWM with the correct executed action sequence
-2. LeWM with a whole action sequence shuffled from another held-out window
+```bash
+"$LEWM_PYTHON" -m lewm_orbit_bridge.evaluate_latent_prediction \
+  --config "$LEWM_CONFIG" \
+  --checkpoint "$LEWM_CHECKPOINT" \
+  --horizons 1 3 5 10 \
+  --max-windows 1000 \
+  --seed 3072
+```
+
+For a different goal-trajectory sampling stride:
+
+```bash
+"$LEWM_PYTHON" -m lewm_orbit_bridge.evaluate_goal_structure \
+  --config "$LEWM_CONFIG" \
+  --checkpoint "$LEWM_CHECKPOINT" \
+  --sample-stride 30
+```
+
+Latent prediction reports MSE and cosine similarity at 1, 3, 5, and 10 world-model transitions. It compares:
+
+1. LeWM using the correct executed action sequence
+2. LeWM using a whole action sequence from a different held-out episode
 3. Persistence, `z_hat(t+h) = z_t`
 
-The primary action-conditioning criterion is positive shuffled-action margin:
+The primary action-conditioning criterion is:
 
 ```text
 MSE(shuffled actions) - MSE(correct actions) > 0
 ```
 
-If correct and shuffled actions perform similarly, LeWM is not sufficiently action-sensitive for future ManiFlow candidate reranking even if it beats persistence.
+If correct and shuffled actions perform similarly, LeWM is not sufficiently action-sensitive for future ManiFlow candidate reranking even if it beats persistence. Goal-structure evaluation constructs nearest and mean successful-goal embeddings from expert/genuinely successful training episodes and measures test trajectories; these distances are exploratory, not calibrated values.
 
-Goal-structure evaluation constructs nearest and mean successful-goal embeddings from expert/genuinely successful **training** episodes, then measures test trajectories. These distances are exploratory and are not treated as calibrated values.
+Evaluation outputs are written under:
+
+```text
+$LEWM_OUTPUT_DIR/latent_prediction/
+$LEWM_OUTPUT_DIR/goal_structure/
+```
+
+## Troubleshooting
+
+| Symptom | Action |
+| --- | --- |
+| `LEWM_CHECKPOINT` is required | Export it to the full run's `lewm_object.ckpt` before evaluation |
+| Checkpoint or artifact hash mismatch | Ensure `LEWM_OUTPUT_DIR`, `LEWM_CONFIG`, and `LEWM_CHECKPOINT` all refer to the same run |
+| CUDA unavailable or BF16 unsupported | Use a CUDA-capable training host; experiment 1 is configured for GPU BF16 |
+| GPU out of memory | Lower `--batch-size`; do not change image size or architecture for the first experiment |
+| DataLoader worker failure | Retry with `--num-workers 0` to diagnose, then increase gradually |
+| Existing Lance output error | Add `--overwrite` only when intentionally regenerating all data and splits |
+| Unexpected upstream commit | Rerun `setup_lewm.sh`; the converter rejects unpinned LeWM or Stable World Model revisions |
+| Parquet nested-list read errors under system Python | Use `$LEWM_PYTHON`, not an unrelated Python installation |
+| Tiny-overfit loss does not fall by 20% | Stop and debug alignment, normalization, or data loading before full training |
 
 ## Go/No-Go Order
 
