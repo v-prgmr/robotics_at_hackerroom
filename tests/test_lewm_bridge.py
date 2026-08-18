@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -170,3 +172,29 @@ def test_hf_private_upload_refuses_existing_public_repo(monkeypatch):
 
     with pytest.raises(ValueError, match="is public"):
         HuggingFaceRunUploader(config)
+
+
+def test_train_launcher_uses_package_module_from_any_working_directory(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    fake_python = tmp_path / "python"
+    fake_python.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$PYTHONPATH\" \"$@\"\n")
+    fake_python.chmod(0o755)
+    environment = {
+        **os.environ,
+        "ORBIT_DIR": str(repo_root),
+        "LEWM_PYTHON": str(fake_python),
+        "PYTHONPATH": "/existing/pythonpath",
+    }
+
+    result = subprocess.run(
+        [str(repo_root / "lewm_orbit_bridge/train_teabag_lewm.sh"), "--mode", "smoke"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    lines = result.stdout.splitlines()
+    assert lines[0] == f"{repo_root}:/existing/pythonpath"
+    assert lines[1:3] == ["-m", "lewm_orbit_bridge.train_lewm"]
