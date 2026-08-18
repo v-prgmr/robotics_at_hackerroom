@@ -218,3 +218,12 @@ def test_training_metric_stages_match_checkpoint_namespace():
     assert _metric_stage("fit") == "train"
     assert _metric_stage("validate") == "val"
     assert _metric_stage("test") == "test"
+
+
+def test_full_training_has_resume_aware_whole_run_progress():
+    trainer = (Path(__file__).resolve().parents[1] / "lewm_orbit_bridge/train_lewm.py").read_text()
+
+    assert "class WholeRunProgressCallback" in trainer
+    assert "trainer.estimated_stepping_batches" in trainer
+    assert "initial=self.last_step" in trainer
+    assert 'trainer_cfg["enable_progress_bar"] = False' in trainer

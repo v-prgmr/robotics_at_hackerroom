@@ -276,6 +276,8 @@ Prefer `--batch-size` over `loader.batch_size=...` when only changing batch size
 
 Keep full training epoch-based (`trainer.max_epochs=100`, `trainer.max_steps=-1`) so every epoch reaches validation and checkpoint selection. For the current 70-episode training split with 47,203 valid clips, batch size 96 on one GPU gives 491 full batches per epoch and approximately 49,100 optimizer steps over 100 epochs. This is the batch-96 equivalent of the released 100-epoch LeWM schedule; use `--max-steps` only for smoke and tiny-overfit diagnostics.
 
+Full mode displays one TQDM bar across all estimated optimizer steps, including percentage, elapsed time, remaining ETA, throughput, and current epoch. The total is calculated from the configured data loader and trainer rather than hard-coded; resumed runs initialize the bar from the restored global step. Smoke and tiny-overfit modes retain Lightning's normal per-epoch progress bar.
+
 Local `checkpoints/last.ckpt` and validation-selected `checkpoints/best.ckpt` are updated every epoch. When HF upload is enabled, `HF_CHECKPOINT_INTERVAL_EPOCHS=N` additionally uploads resumable recovery files every `N` epochs:
 
 ```text

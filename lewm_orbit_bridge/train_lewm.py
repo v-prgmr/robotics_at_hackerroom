@@ -211,6 +211,51 @@ def main(argv: list[str] | None = None) -> None:
         auto_insert_metric_name=False,
     )
 
+    class WholeRunProgressCallback(Callback):
+        """Show one resume-aware progress bar across every optimizer step."""
+
+        def __init__(self) -> None:
+            self.progress = None
+            self.last_step = 0
+
+        def on_fit_start(self, trainer, pl_module) -> None:
+            if not trainer.is_global_zero:
+                return
+            total = trainer.estimated_stepping_batches
+            if not np.isfinite(total) or int(total) <= 0:
+                return
+            from tqdm.auto import tqdm
+
+            self.last_step = int(trainer.global_step)
+            self.progress = tqdm(
+                total=max(int(total), self.last_step),
+                initial=self.last_step,
+                desc="Full training",
+                unit="step",
+                dynamic_ncols=True,
+            )
+            self.progress.set_postfix(epoch=f"{int(trainer.current_epoch) + 1}/{int(trainer.max_epochs)}")
+
+        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+            if self.progress is None:
+                return
+            current_step = int(trainer.global_step)
+            if current_step > self.last_step:
+                self.progress.update(current_step - self.last_step)
+                self.last_step = current_step
+            self.progress.set_postfix(epoch=f"{int(trainer.current_epoch) + 1}/{int(trainer.max_epochs)}")
+
+        def on_fit_end(self, trainer, pl_module) -> None:
+            self._close()
+
+        def on_exception(self, trainer, pl_module, exception) -> None:
+            self._close()
+
+        def _close(self) -> None:
+            if self.progress is not None:
+                self.progress.close()
+                self.progress = None
+
     class HuggingFaceCheckpointCallback(Callback):
         """Periodically save and upload a full-state recovery checkpoint."""
 
@@ -247,9 +292,13 @@ def main(argv: list[str] | None = None) -> None:
 
     hf_callback = HuggingFaceCheckpointCallback()
     callbacks = [RunIdentityCallback(), checkpoint]
+    if args.mode == "full":
+        callbacks.append(WholeRunProgressCallback())
     if hf_config.enabled:
         callbacks.append(hf_callback)
     trainer_cfg = OmegaConf.to_container(cfg.trainer, resolve=True)
+    if args.mode == "full":
+        trainer_cfg["enable_progress_bar"] = False
     trainer = pl.Trainer(
         **trainer_cfg,
         callbacks=callbacks,
